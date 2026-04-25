@@ -1,0 +1,14 @@
+.venv
+.env
+.bin
+include
+lib
+lib64
+pip-selfcheck.json
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+bin
+indexing.db*
