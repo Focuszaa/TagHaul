@@ -3,6 +3,10 @@ import os
 import queue
 import threading
 import uuid
+from concurrent.futures import FIRST_COMPLETED
+from concurrent.futures import Future
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
@@ -13,21 +17,29 @@ from flask import jsonify
 from flask import render_template
 from flask import request
 
-from tagger_backend import DEFAULT_DB
 from tagger_backend import DEFAULT_DASHBOARD_ROOT
+from tagger_backend import DEFAULT_DB
+from tagger_backend import DEFAULT_HOST
 from tagger_backend import DEFAULT_LOG
+from tagger_backend import DEFAULT_MAX_WORKERS
 from tagger_backend import DEFAULT_MODEL
+from tagger_backend import DEFAULT_PORT
 from tagger_backend import OLLAMA_PROMPT
 from tagger_backend import expand_selection
 from tagger_backend import list_directory
 from tagger_backend import logger
 from tagger_backend import open_task_db
-from tagger_backend import process_image_paths
+from tagger_backend import process_single_image
 from tagger_backend import serialize_event
 from tagger_backend import setup_logging
 
 APP_ROOT = Path(__file__).resolve().parent
 DASHBOARD_ROOT_ENV_VAR = "PHOTO_TAGGER_DASHBOARD_ROOT"
+DB_PATH_ENV_VAR = "PHOTO_TAGGER_DB_PATH"
+HOST_ENV_VAR = "PHOTO_TAGGER_HOST"
+PORT_ENV_VAR = "PHOTO_TAGGER_PORT"
+SETTINGS_PATH_ENV_VAR = "PHOTO_TAGGER_SETTINGS_PATH"
+MAX_WORKERS_ENV_VAR = "PHOTO_TAGGER_MAX_WORKERS"
 
 app = Flask(__name__)
 setup_logging(str(APP_ROOT / DEFAULT_LOG))
@@ -35,6 +47,16 @@ setup_logging(str(APP_ROOT / DEFAULT_LOG))
 
 def get_dashboard_root() -> str:
     configured = os.environ.get(DASHBOARD_ROOT_ENV_VAR, DEFAULT_DASHBOARD_ROOT)
+    return str(Path(configured).expanduser().resolve())
+
+
+def get_db_path() -> str:
+    configured = os.environ.get(DB_PATH_ENV_VAR, DEFAULT_DB)
+    return str(Path(configured).expanduser().resolve())
+
+
+def get_settings_path() -> str:
+    configured = os.environ.get(SETTINGS_PATH_ENV_VAR, APP_ROOT / "tagger_settings.json")
     return str(Path(configured).expanduser().resolve())
 
 
@@ -48,25 +70,115 @@ def resolve_dashboard_root(root_value: str | None) -> str:
     return str(root_path)
 
 
-class TaskManager:
-    """Multi-task queue: one worker thread processes tasks FIFO; each task can be stopped and resumed."""
+def normalize_selected_paths(root: str, selected_paths: list[str]) -> list[str]:
+    """Keep the most specific selections to avoid accidental broad scans."""
+    root_path = Path(root).resolve()
+    resolved_paths: list[tuple[str, Path]] = []
+    seen: set[str] = set()
 
-    def __init__(self, db_path: str) -> None:
+    for raw_path in selected_paths:
+        normalized = raw_path.strip().strip("/")
+        if normalized in seen:
+            continue
+
+        resolved_path = (root_path / normalized).resolve() if normalized else root_path
+        try:
+            resolved_path.relative_to(root_path)
+        except ValueError as exc:
+            raise ValueError("Selected path escapes the configured photo root.") from exc
+
+        seen.add(normalized)
+        resolved_paths.append((normalized, resolved_path))
+
+    kept: list[tuple[str, Path]] = []
+    for candidate in sorted(resolved_paths, key=lambda item: (-len(item[1].parts), item[0])):
+        _, candidate_path = candidate
+        if any(existing_path.is_relative_to(candidate_path) for _, existing_path in kept):
+            continue
+        kept.append(candidate)
+
+    return [raw_path for raw_path, _ in sorted(kept, key=lambda item: (len(item[1].parts), item[0]))]
+
+
+class TaskManager:
+    """Global multi-task scheduler with shared worker concurrency across all tasks."""
+
+    def __init__(self, db_path: str, settings_path: str) -> None:
         self._db_path = db_path
+        self._settings_path = Path(settings_path)
         self._lock = threading.Lock()
         self._tasks: dict[str, dict] = {}
-        self._task_queue: queue.Queue[str] = queue.Queue()
+        self._task_order: list[str] = []
+        self._dispatch_cursor = 0
         self._conn = open_task_db(db_path)
+        self._future_jobs: dict[Future, dict] = {}
+        self._global_sum_seconds = 0.0
+        self._global_processed_count = 0
+        self._max_workers = self._load_max_workers()
+        self._executor = ThreadPoolExecutor(max_workers=self._max_workers, thread_name_prefix="taghaul")
+        self._prepare_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="taghaul-prepare")
+        self._preparation_future: Future | None = None
+        self._preparation_task_id: str | None = None
         self._load_tasks_from_db()
-        worker = threading.Thread(target=self._worker_loop, daemon=True)
-        worker.start()
+        self._scheduler = threading.Thread(target=self._schedule_loop, daemon=True)
+        self._scheduler.start()
 
-    # ------------------------------------------------------------------
-    # Startup recovery
-    # ------------------------------------------------------------------
+    def _load_max_workers(self) -> int:
+        default_value = int(os.environ.get(MAX_WORKERS_ENV_VAR, DEFAULT_MAX_WORKERS))
+        default_value = max(1, min(4, default_value))
+
+        if not self._settings_path.exists():
+            return default_value
+
+        try:
+            payload = json.loads(self._settings_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return default_value
+
+        stored = int(payload.get("max_workers", default_value))
+        return max(1, min(4, stored))
+
+    def _save_settings_locked(self) -> None:
+        self._settings_path.parent.mkdir(parents=True, exist_ok=True)
+        self._settings_path.write_text(
+            json.dumps({"max_workers": self._max_workers}, indent=2),
+            encoding="utf-8",
+        )
+
+    def get_settings(self) -> dict:
+        with self._lock:
+            return {
+                "max_workers": self._max_workers,
+                "global_eta_seconds": self._compute_global_eta_locked(),
+            }
+
+    def update_max_workers(self, new_value: int) -> dict:
+        if new_value < 1:
+            raise ValueError("Max parallel workers must be at least 1.")
+        if new_value > 4:
+            raise ValueError("Max parallel workers cannot exceed 4 because of VRAM limits.")
+
+        with self._lock:
+            if new_value == self._max_workers:
+                settings = {
+                    "max_workers": self._max_workers,
+                    "global_eta_seconds": self._compute_global_eta_locked(),
+                }
+            else:
+                old_executor = self._executor
+                self._max_workers = new_value
+                self._executor = ThreadPoolExecutor(max_workers=self._max_workers, thread_name_prefix="taghaul")
+                self._save_settings_locked()
+                self._recalculate_global_eta_locked()
+                settings = {
+                    "max_workers": self._max_workers,
+                    "global_eta_seconds": self._compute_global_eta_locked(),
+                }
+                old_executor.shutdown(wait=False, cancel_futures=False)
+
+        return settings
 
     def _load_tasks_from_db(self) -> None:
-        """Load persisted tasks; mark any that were running/queued as stopped."""
         cursor = self._conn.execute(
             "SELECT id, root, selected_paths, model, prompt, temperature, dry_run, "
             "status, total, processed, skipped, errors, completed, avg_seconds, "
@@ -75,9 +187,23 @@ class TaskManager:
         rows = cursor.fetchall()
         for row in rows:
             (
-                task_id, root, selected_paths_json, model, prompt, temperature, dry_run,
-                status, total, processed, skipped, errors, completed, avg_seconds,
-                created_at, started_at, completed_at,
+                task_id,
+                root,
+                selected_paths_json,
+                model,
+                prompt,
+                temperature,
+                dry_run,
+                status,
+                total,
+                processed,
+                skipped,
+                errors,
+                completed,
+                avg_seconds,
+                created_at,
+                started_at,
+                completed_at,
             ) = row
             if status in ("queued", "running"):
                 status = "stopped"
@@ -102,11 +228,9 @@ class TaskManager:
                 completed_at=completed_at,
             )
             self._tasks[task_id] = task
+            self._task_order.append(task_id)
         self._conn.commit()
-
-    # ------------------------------------------------------------------
-    # Internal helpers
-    # ------------------------------------------------------------------
+        self._recalculate_global_eta_locked()
 
     @staticmethod
     def _make_task_dict(
@@ -153,6 +277,10 @@ class TaskManager:
             "stop_event": threading.Event(),
             "listeners": [],
             "history": [],
+            "pending_paths": None,
+            "preparing": False,
+            "active_futures": 0,
+            "terminal_emitted": False,
         }
 
     def _snapshot_from_task(self, task_id: str, task: dict) -> dict:
@@ -175,11 +303,249 @@ class TaskManager:
             "created_at": task["created_at"],
             "started_at": task["started_at"],
             "completed_at": task["completed_at"],
+            "max_workers": self._max_workers,
         }
 
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+    def _compute_global_eta_locked(self) -> int | None:
+        if self._global_processed_count > 0:
+            avg_seconds = self._global_sum_seconds / self._global_processed_count
+        else:
+            per_task_averages = [task["avg_seconds"] for task in self._tasks.values() if task["avg_seconds"] > 0]
+            avg_seconds = (sum(per_task_averages) / len(per_task_averages)) if per_task_averages else 0.0
+
+        if avg_seconds <= 0:
+            return None
+
+        remaining = 0
+        for task in self._tasks.values():
+            if task["status"] in ("queued", "running"):
+                remaining += max(task["total"] - task["completed"], 0)
+
+        if remaining <= 0:
+            return 0
+
+        return int((remaining / max(self._max_workers, 1)) * avg_seconds)
+
+    def _next_unprepared_task_locked(self) -> tuple[str | None, dict | None]:
+        for task_id in self._task_order:
+            task = self._tasks.get(task_id)
+            if not task:
+                continue
+            if task["status"] not in ("queued", "running"):
+                continue
+            if task["stop_event"].is_set() or task["preparing"]:
+                continue
+            if task["pending_paths"] is None:
+                task["preparing"] = True
+                return task_id, task
+        return None, None
+
+    def _recalculate_global_eta_locked(self) -> int | None:
+        global_eta = self._compute_global_eta_locked()
+        for task in self._tasks.values():
+            if task["status"] in ("queued", "running"):
+                task["eta_seconds"] = global_eta
+            elif task["status"] == "stopped":
+                task["eta_seconds"] = None
+            elif task["status"] in ("completed", "failed"):
+                task["eta_seconds"] = 0
+        return global_eta
+
+    def _publish(self, task_id: str, payload: dict) -> None:
+        with self._lock:
+            task = self._tasks.get(task_id)
+            if not task:
+                return
+            event_text = serialize_event(payload)
+            task["history"].append(event_text)
+            listeners = list(task["listeners"])
+
+        for listener in listeners:
+            listener.put(event_text)
+
+    def _next_dispatchable_task_locked(self) -> tuple[str | None, dict | None]:
+        if not self._task_order:
+            return None, None
+
+        count = len(self._task_order)
+        for offset in range(count):
+            index = (self._dispatch_cursor + offset) % count
+            task_id = self._task_order[index]
+            task = self._tasks.get(task_id)
+            if not task:
+                continue
+            if task["status"] not in ("queued", "running"):
+                continue
+            if task["stop_event"].is_set():
+                continue
+            if task["pending_paths"]:
+                self._dispatch_cursor = (index + 1) % count
+                return task_id, task
+
+        return None, None
+
+    def _finalize_task_locked(self, task_id: str) -> None:
+        task = self._tasks.get(task_id)
+        if not task or task["terminal_emitted"]:
+            return
+        if task["active_futures"] > 0 or task["pending_paths"]:
+            return
+
+        if task["stop_event"].is_set() or task["status"] == "stopped":
+            task["status"] = "stopped"
+            task["eta_seconds"] = None
+            self._conn.execute(
+                "UPDATE tasks SET status='stopped', processed=?, skipped=?, errors=?, completed=? WHERE id=?",
+                (task["processed"], task["skipped"], task["errors"], task["completed"], task_id),
+            )
+            self._conn.commit()
+            task["terminal_emitted"] = True
+            self._recalculate_global_eta_locked()
+            payload = {
+                "event": "stopped",
+                "task_id": task_id,
+                **self._snapshot_from_task(task_id, task),
+            }
+        else:
+            task["status"] = "completed" if task["errors"] == 0 else "failed"
+            task["completed_at"] = datetime.now(timezone.utc).isoformat()
+            task["eta_seconds"] = 0
+            self._conn.execute(
+                "UPDATE tasks SET status=?, completed_at=?, processed=?, skipped=?, errors=?, completed=?, avg_seconds=? WHERE id=?",
+                (
+                    task["status"],
+                    task["completed_at"],
+                    task["processed"],
+                    task["skipped"],
+                    task["errors"],
+                    task["completed"],
+                    task["avg_seconds"],
+                    task_id,
+                ),
+            )
+            self._conn.commit()
+            task["terminal_emitted"] = True
+            self._recalculate_global_eta_locked()
+            payload = {
+                "event": "complete",
+                "task_id": task_id,
+                "completed": task["completed"],
+                "processed": task["processed"],
+                "skipped": task["skipped"],
+                "errors": task["errors"],
+                "total": task["total"],
+                "eta_seconds": task["eta_seconds"],
+            }
+
+        listeners = list(task["listeners"])
+        event_text = serialize_event(payload)
+        task["history"].append(event_text)
+
+        for listener in listeners:
+            listener.put(event_text)
+
+    def _handle_worker_result_locked(self, task_id: str, result: dict, started_at: float) -> list[dict]:
+        task = self._tasks.get(task_id)
+        if not task:
+            return []
+
+        duration = monotonic() - started_at
+        events: list[dict] = []
+        event_name = result.get("event")
+        task["completed"] += 1
+
+        if event_name == "written":
+            task["processed"] += 1
+            task["sum_seconds"] += duration
+            task["count_processed"] += 1
+            task["avg_seconds"] = task["sum_seconds"] / task["count_processed"]
+            self._global_sum_seconds += duration
+            self._global_processed_count += 1
+            self._recalculate_global_eta_locked()
+            self._conn.execute(
+                "UPDATE tasks SET processed=?, completed=?, avg_seconds=? WHERE id=?",
+                (task["processed"], task["completed"], task["avg_seconds"], task_id),
+            )
+            self._conn.commit()
+            if result.get("description"):
+                events.append(
+                    {
+                        "event": "describe",
+                        "task_id": task_id,
+                        "path": result.get("path"),
+                        "description": result.get("description"),
+                    }
+                )
+            events.append(
+                {
+                    "event": "written",
+                    "task_id": task_id,
+                    "path": result.get("path"),
+                    "description": result.get("description"),
+                    "current": task["completed"],
+                    "total": task["total"],
+                    "eta_seconds": task["eta_seconds"],
+                    "avg_seconds": round(task["avg_seconds"], 2),
+                }
+            )
+        elif event_name == "skip":
+            task["skipped"] += 1
+            self._recalculate_global_eta_locked()
+            self._conn.execute(
+                "UPDATE tasks SET skipped=?, completed=? WHERE id=?",
+                (task["skipped"], task["completed"], task_id),
+            )
+            self._conn.commit()
+            events.append(
+                {
+                    "event": "skip",
+                    "task_id": task_id,
+                    "path": result.get("path"),
+                    "message": result.get("message"),
+                    "skip_reason": result.get("skip_reason"),
+                    "current": task["completed"],
+                    "total": task["total"],
+                    "eta_seconds": task["eta_seconds"],
+                }
+            )
+        elif event_name == "dry-run":
+            self._recalculate_global_eta_locked()
+            self._conn.execute(
+                "UPDATE tasks SET completed=? WHERE id=?",
+                (task["completed"], task_id),
+            )
+            self._conn.commit()
+            events.append(
+                {
+                    "event": "dry-run",
+                    "task_id": task_id,
+                    "path": result.get("path"),
+                    "current": task["completed"],
+                    "total": task["total"],
+                    "eta_seconds": task["eta_seconds"],
+                }
+            )
+        else:
+            task["errors"] += 1
+            self._recalculate_global_eta_locked()
+            self._conn.execute(
+                "UPDATE tasks SET errors=?, completed=? WHERE id=?",
+                (task["errors"], task["completed"], task_id),
+            )
+            self._conn.commit()
+            events.append(
+                {
+                    "event": "error",
+                    "task_id": task_id,
+                    "path": result.get("path"),
+                    "message": result.get("message", "unknown error"),
+                    "current": task["completed"],
+                    "total": task["total"],
+                    "eta_seconds": task["eta_seconds"],
+                }
+            )
+
+        return events
 
     def create_task(
         self,
@@ -191,24 +557,23 @@ class TaskManager:
         prompt: str,
         temperature: float,
     ) -> dict:
-        image_paths = expand_selection(root, selected_paths)
-        if not image_paths:
+        normalized_paths = normalize_selected_paths(root, selected_paths)
+        if not normalized_paths:
             raise ValueError("No supported images found in the selected paths.")
 
         task_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc).isoformat()
-        total = len(image_paths)
 
         task = self._make_task_dict(
             task_id=task_id,
             root=root,
-            selected_paths=selected_paths,
+            selected_paths=normalized_paths,
             model=model,
             prompt=prompt,
             temperature=temperature,
             dry_run=dry_run,
             status="queued",
-            total=total,
+            total=0,
             processed=0,
             skipped=0,
             errors=0,
@@ -225,15 +590,31 @@ class TaskManager:
                 "status, total, processed, skipped, errors, completed, avg_seconds, created_at, "
                 "started_at, completed_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
-                    task_id, root, json.dumps(selected_paths), model, prompt, temperature,
-                    int(dry_run), "queued", total, 0, 0, 0, 0, 0.0, now, None, None,
+                    task_id,
+                    root,
+                    json.dumps(normalized_paths),
+                    model,
+                    prompt,
+                    temperature,
+                    int(dry_run),
+                    "queued",
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0.0,
+                    now,
+                    None,
+                    None,
                 ),
             )
             self._conn.commit()
             self._tasks[task_id] = task
+            self._task_order.append(task_id)
+            self._recalculate_global_eta_locked()
             snapshot = self._snapshot_from_task(task_id, task)
 
-        self._task_queue.put(task_id)
         return snapshot
 
     def get_task(self, task_id: str) -> dict | None:
@@ -243,16 +624,24 @@ class TaskManager:
 
     def list_tasks(self) -> list[dict]:
         with self._lock:
-            return [self._snapshot_from_task(tid, t) for tid, t in self._tasks.items()]
+            return [self._snapshot_from_task(task_id, task) for task_id, task in self._tasks.items()]
 
     def stop_task(self, task_id: str) -> dict | None:
         with self._lock:
             task = self._tasks.get(task_id)
             if not task:
                 return None
-            if task["status"] == "running":
-                task["stop_event"].set()
-            return self._snapshot_from_task(task_id, task)
+            task["stop_event"].set()
+            task["status"] = "stopped"
+            task["pending_paths"] = []
+            task["preparing"] = False
+            self._conn.execute("UPDATE tasks SET status='stopped' WHERE id=?", (task_id,))
+            self._conn.commit()
+            self._recalculate_global_eta_locked()
+            snapshot = self._snapshot_from_task(task_id, task)
+            if task["active_futures"] == 0:
+                self._finalize_task_locked(task_id)
+            return snapshot
 
     def resume_task(self, task_id: str) -> dict | None:
         with self._lock:
@@ -261,6 +650,11 @@ class TaskManager:
                 return None
             if task["status"] != "stopped":
                 return self._snapshot_from_task(task_id, task)
+            if task["active_futures"] > 0:
+                raise ValueError("Wait for in-flight work to finish before resuming this task.")
+
+        with self._lock:
+            task = self._tasks[task_id]
             task["stop_event"] = threading.Event()
             task["status"] = "queued"
             task["processed"] = 0
@@ -271,26 +665,31 @@ class TaskManager:
             task["count_processed"] = 0
             task["avg_seconds"] = 0.0
             task["eta_seconds"] = None
+            task["pending_paths"] = None
+            task["preparing"] = False
+            task["total"] = 0
+            task["completed_at"] = None
             task["history"] = []
+            task["terminal_emitted"] = False
             self._conn.execute(
-                "UPDATE tasks SET status='queued', processed=0, skipped=0, errors=0, "
-                "completed=0, avg_seconds=0 WHERE id=?",
-                (task_id,),
+                "UPDATE tasks SET status='queued', total=?, processed=0, skipped=0, errors=0, completed=0, avg_seconds=0, completed_at=NULL WHERE id=?",
+                (task["total"], task_id),
             )
             self._conn.commit()
-            snapshot = self._snapshot_from_task(task_id, task)
-
-        self._task_queue.put(task_id)
-        return snapshot
+            self._recalculate_global_eta_locked()
+            return self._snapshot_from_task(task_id, task)
 
     def clear_completed(self) -> None:
         with self._lock:
-            to_remove = [
-                tid for tid, t in self._tasks.items()
-                if t["status"] in ("completed", "failed")
-            ]
-            for tid in to_remove:
-                del self._tasks[tid]
+            to_remove = []
+            for task_id, task in self._tasks.items():
+                if task["status"] in ("completed", "failed") and task["active_futures"] == 0:
+                    to_remove.append(task_id)
+
+            for task_id in to_remove:
+                self._tasks.pop(task_id, None)
+                if task_id in self._task_order:
+                    self._task_order.remove(task_id)
 
     def attach_listener(self, task_id: str) -> tuple[dict, queue.Queue]:
         listener: queue.Queue = queue.Queue()
@@ -309,204 +708,220 @@ class TaskManager:
             if task and listener in task["listeners"]:
                 task["listeners"].remove(listener)
 
-    # ------------------------------------------------------------------
-    # Internal event publishing
-    # ------------------------------------------------------------------
-
-    def _publish(self, task_id: str, payload: dict) -> None:
-        with self._lock:
-            task = self._tasks.get(task_id)
-            if not task:
-                return
-
-            event_name = payload.get("event")
-
-            if event_name == "written":
-                task["completed"] += 1
-                task["processed"] += 1
-                delta = payload.pop("_delta", None)
-                if delta is not None:
-                    task["sum_seconds"] += delta
-                    task["count_processed"] += 1
-                    task["avg_seconds"] = task["sum_seconds"] / task["count_processed"]
-                remaining = task["total"] - task["completed"]
-                task["eta_seconds"] = (
-                    int(remaining * task["avg_seconds"]) if task["avg_seconds"] > 0 else None
-                )
-                payload["eta_seconds"] = task["eta_seconds"]
-                payload["avg_seconds"] = round(task["avg_seconds"], 2)
-                self._conn.execute(
-                    "UPDATE tasks SET processed=?, completed=?, avg_seconds=? WHERE id=?",
-                    (task["processed"], task["completed"], task["avg_seconds"], task_id),
-                )
-                self._conn.commit()
-
-            elif event_name == "skip":
-                task["completed"] += 1
-                task["skipped"] += 1
-
-            elif event_name == "dry-run":
-                task["completed"] += 1
-
-            elif event_name == "error":
-                task["completed"] += 1
-                task["errors"] += 1
-                self._conn.execute(
-                    "UPDATE tasks SET errors=?, completed=? WHERE id=?",
-                    (task["errors"], task["completed"], task_id),
-                )
-                self._conn.commit()
-
-            elif event_name == "stopped":
-                task["status"] = "stopped"
-                task["eta_seconds"] = None
-                self._conn.execute(
-                    "UPDATE tasks SET status='stopped', processed=?, skipped=?, errors=?, completed=? WHERE id=?",
-                    (task["processed"], task["skipped"], task["errors"], task["completed"], task_id),
-                )
-                self._conn.commit()
-
-            elif event_name == "complete":
-                task["status"] = "completed" if payload.get("errors", 0) == 0 else "failed"
-                task["completed_at"] = datetime.now(timezone.utc).isoformat()
-                task["completed"] = payload.get("completed", task["completed"])
-                task["processed"] = payload.get("processed", task["processed"])
-                task["skipped"] = payload.get("skipped", task["skipped"])
-                task["errors"] = payload.get("errors", task["errors"])
-                task["eta_seconds"] = 0
-                self._conn.execute(
-                    "UPDATE tasks SET status=?, completed_at=?, processed=?, skipped=?, "
-                    "errors=?, completed=? WHERE id=?",
-                    (
-                        task["status"], task["completed_at"], task["processed"],
-                        task["skipped"], task["errors"], task["completed"], task_id,
-                    ),
-                )
-                self._conn.commit()
-
-            event_text = serialize_event(payload)
-            task["history"].append(event_text)
-            listeners = list(task["listeners"])
-
-        for listener in listeners:
-            listener.put(event_text)
-
-    # ------------------------------------------------------------------
-    # Worker loop
-    # ------------------------------------------------------------------
-
-    def _worker_loop(self) -> None:
+    def _schedule_loop(self) -> None:
         while True:
-            task_id = self._task_queue.get()
-
+            completed_preparation = None
+            completed_preparation_task_id = None
             with self._lock:
-                task = self._tasks.get(task_id)
-                if not task or task["status"] != "queued":
-                    continue
-                task["status"] = "running"
-                if not task["started_at"]:
-                    task["started_at"] = datetime.now(timezone.utc).isoformat()
-                root = task["root"]
-                selected_paths = list(task["selected_paths"])
-                model = task["model"]
-                dry_run = task["dry_run"]
-                prompt = task["prompt"]
-                temperature = task["temperature"]
-                stop_event = task["stop_event"]
-                self._conn.execute(
-                    "UPDATE tasks SET status='running', started_at=? WHERE id=?",
-                    (task["started_at"], task_id),
-                )
-                self._conn.commit()
+                while len(self._future_jobs) < self._max_workers:
+                    task_id, task = self._next_dispatchable_task_locked()
+                    if not task_id or not task:
+                        break
+                    if task["pending_paths"] is None:
+                        break
+                    if not task["pending_paths"]:
+                        self._finalize_task_locked(task_id)
+                        continue
 
-            # Re-expand selection so is_processed filters already-tagged files on resume
-            try:
-                image_paths = expand_selection(root, selected_paths)
-            except Exception as exc:
-                self._publish(task_id, {
-                    "event": "error", "task_id": task_id,
-                    "message": f"Failed to expand selection: {exc}",
-                })
-                self._publish(task_id, {
-                    "event": "complete", "task_id": task_id,
-                    "completed": 0, "processed": 0, "skipped": 0, "errors": 1, "total": 0,
-                })
+                    image_path = task["pending_paths"].pop(0)
+                    if task["status"] == "queued":
+                        task["status"] = "running"
+                        if not task["started_at"]:
+                            task["started_at"] = datetime.now(timezone.utc).isoformat()
+                        self._conn.execute(
+                            "UPDATE tasks SET status='running', started_at=? WHERE id=?",
+                            (task["started_at"], task_id),
+                        )
+                        self._conn.commit()
+                        self._recalculate_global_eta_locked()
+                        running_event = {
+                            "event": "running",
+                            "task_id": task_id,
+                            "total": task["total"],
+                            "eta_seconds": task["eta_seconds"],
+                            "max_workers": self._max_workers,
+                        }
+                    else:
+                        running_event = None
+
+                    task["active_futures"] += 1
+                    started_at = monotonic()
+                    future = self._executor.submit(
+                        process_single_image,
+                        image_path,
+                        task["model"],
+                        self._db_path,
+                        task["dry_run"],
+                        prompt=task["prompt"],
+                        temperature=task["temperature"],
+                    )
+                    self._future_jobs[future] = {
+                        "task_id": task_id,
+                        "path": image_path,
+                        "started_at": started_at,
+                    }
+                    processing_event = {
+                        "event": "processing",
+                        "task_id": task_id,
+                        "path": image_path,
+                        "current": min(task["completed"] + task["active_futures"], task["total"]),
+                        "total": task["total"],
+                        "eta_seconds": task["eta_seconds"],
+                        "max_workers": self._max_workers,
+                    }
+
+                    listeners = list(task["listeners"])
+                    to_send = []
+                    if running_event:
+                        task["history"].append(serialize_event(running_event))
+                        to_send.append(running_event)
+                    task["history"].append(serialize_event(processing_event))
+                    to_send.append(processing_event)
+
+                    for event in to_send:
+                        event_text = serialize_event(event)
+                        for listener in listeners:
+                            listener.put(event_text)
+
+                futures = list(self._future_jobs.keys())
+                if self._preparation_future and self._preparation_future.done():
+                    completed_preparation = self._preparation_future
+                    completed_preparation_task_id = self._preparation_task_id
+                    self._preparation_future = None
+                    self._preparation_task_id = None
+
+                if self._preparation_future is None:
+                    unprepared_task_id, unprepared_task = self._next_unprepared_task_locked()
+                    if unprepared_task_id and unprepared_task:
+                        self._preparation_future = self._prepare_executor.submit(
+                            expand_selection,
+                            unprepared_task["root"],
+                            list(unprepared_task["selected_paths"]),
+                        )
+                        self._preparation_task_id = unprepared_task_id
+
+            if completed_preparation:
+                try:
+                    image_paths = completed_preparation.result()
+                    preparation_error = None
+                except Exception as exc:  # pragma: no cover - scheduler safeguard
+                    image_paths = []
+                    preparation_error = str(exc)
+
+                with self._lock:
+                    task = self._tasks.get(completed_preparation_task_id)
+                    if task:
+                        if task["stop_event"].is_set() or task["status"] == "stopped":
+                            task["preparing"] = False
+                            task["pending_paths"] = []
+                            self._finalize_task_locked(completed_preparation_task_id)
+                            continue
+
+                        task["preparing"] = False
+                        task["pending_paths"] = [str(path) for path in image_paths]
+                        task["total"] = len(image_paths)
+                        self._conn.execute(
+                            "UPDATE tasks SET total=? WHERE id=?",
+                            (task["total"], completed_preparation_task_id),
+                        )
+                        self._conn.commit()
+
+                        if preparation_error or not image_paths:
+                            task["status"] = "failed"
+                            task["errors"] = 1
+                            task["eta_seconds"] = 0
+                            task["completed_at"] = datetime.now(timezone.utc).isoformat()
+                            task["terminal_emitted"] = True
+                            self._conn.execute(
+                                "UPDATE tasks SET status='failed', errors=?, completed_at=? WHERE id=?",
+                                (task["errors"], task["completed_at"], completed_preparation_task_id),
+                            )
+                            self._conn.commit()
+                            self._recalculate_global_eta_locked()
+
+                            failure_message = preparation_error or "No supported images found in the selected paths."
+                            listeners = list(task["listeners"])
+                            failure_events = [
+                                {
+                                    "event": "error",
+                                    "task_id": completed_preparation_task_id,
+                                    "message": failure_message,
+                                    "current": 0,
+                                    "total": 0,
+                                    "eta_seconds": 0,
+                                },
+                                {
+                                    "event": "complete",
+                                    "task_id": completed_preparation_task_id,
+                                    "completed": 0,
+                                    "processed": 0,
+                                    "skipped": 0,
+                                    "errors": 1,
+                                    "total": 0,
+                                    "eta_seconds": 0,
+                                },
+                            ]
+                            for event in failure_events:
+                                event_text = serialize_event(event)
+                                task["history"].append(event_text)
+                                for listener in listeners:
+                                    listener.put(event_text)
+                        else:
+                            self._recalculate_global_eta_locked()
                 continue
 
-            with self._lock:
-                task = self._tasks.get(task_id)
-                if task:
-                    task["total"] = len(image_paths)
-                    self._conn.execute(
-                        "UPDATE tasks SET total=? WHERE id=?", (len(image_paths), task_id)
-                    )
-                    self._conn.commit()
+            if futures:
+                done, _ = wait(futures, timeout=0.25, return_when=FIRST_COMPLETED)
+            else:
+                threading.Event().wait(0.1)
+                continue
 
-            self._publish(task_id, {
-                "event": "running", "task_id": task_id, "total": len(image_paths),
-            })
+            for future in done:
+                with self._lock:
+                    job = self._future_jobs.pop(future, None)
+                if not job:
+                    continue
 
-            # Build a timing-aware callback for ETA computation
-            timing: dict = {}
+                task_id = job["task_id"]
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    logger.exception("Worker failed for task %s: %s", task_id, exc)
+                    result = {
+                        "event": "error",
+                        "path": job["path"],
+                        "message": str(exc),
+                    }
 
-            def make_callback(tid: str, timing_dict: dict):
-                def callback(event: dict) -> None:
-                    ev = event.get("event")
-                    if ev == "processing":
-                        timing_dict["t_start"] = monotonic()
-                    elif ev == "written":
-                        t = timing_dict.pop("t_start", None)
-                        if t is not None:
-                            event = dict(event)
-                            event["_delta"] = monotonic() - t
-                    elif ev in ("error", "stopped", "complete"):
-                        timing_dict.pop("t_start", None)
-                    self._publish(tid, {"task_id": tid, **event})
-                return callback
+                with self._lock:
+                    task = self._tasks.get(task_id)
+                    if not task:
+                        continue
+                    task["active_futures"] = max(task["active_futures"] - 1, 0)
+                    events = self._handle_worker_result_locked(task_id, result, job["started_at"])
+                    should_finalize = task["active_futures"] == 0 and not task["pending_paths"]
 
-            try:
-                process_image_paths(
-                    image_paths,
-                    model,
-                    self._db_path,
-                    dry_run,
-                    prompt=prompt,
-                    temperature=temperature,
-                    event_callback=make_callback(task_id, timing),
-                    stop_event=stop_event,
-                )
-            except Exception as exc:
-                logger.exception("Task %s failed: %s", task_id, exc)
-                snap = self.get_task(task_id) or {}
-                self._publish(task_id, {
-                    "event": "error", "task_id": task_id, "message": str(exc),
-                })
-                self._publish(task_id, {
-                    "event": "complete", "task_id": task_id,
-                    "completed": snap.get("completed", 0),
-                    "processed": snap.get("processed", 0),
-                    "skipped": snap.get("skipped", 0),
-                    "errors": snap.get("errors", 0),
-                    "total": snap.get("total", 0),
-                })
+                for event in events:
+                    self._publish(task_id, event)
+
+                if should_finalize:
+                    with self._lock:
+                        self._finalize_task_locked(task_id)
 
 
-task_manager = TaskManager(str(APP_ROOT / DEFAULT_DB))
-
-
-# ------------------------------------------------------------------
-# Routes
-# ------------------------------------------------------------------
+task_manager = TaskManager(get_db_path(), get_settings_path())
 
 
 @app.get("/")
 def index():
+    settings = task_manager.get_settings()
     return render_template(
         "index.html",
         photo_root=get_dashboard_root(),
         root_env_var=DASHBOARD_ROOT_ENV_VAR,
         default_model=DEFAULT_MODEL,
         prompt=OLLAMA_PROMPT,
+        max_workers=settings["max_workers"],
     )
 
 
@@ -527,19 +942,37 @@ def api_health():
     root_value = request.args.get("root")
     dashboard_root = str(Path(root_value or get_dashboard_root()).expanduser().resolve())
     root_exists = Path(dashboard_root).is_dir()
-    return jsonify({
-        "ok": True,
-        "photo_root": dashboard_root,
-        "root_exists": root_exists,
-        "root_env_var": DASHBOARD_ROOT_ENV_VAR,
-    })
+    return jsonify(
+        {
+            "ok": True,
+            "photo_root": dashboard_root,
+            "root_exists": root_exists,
+            "root_env_var": DASHBOARD_ROOT_ENV_VAR,
+        }
+    )
+
+
+@app.get("/api/settings")
+def api_get_settings():
+    return jsonify(task_manager.get_settings())
+
+
+@app.post("/api/settings")
+def api_update_settings():
+    payload = request.get_json(silent=True) or {}
+    try:
+        max_workers = int(payload.get("max_workers"))
+        settings = task_manager.update_max_workers(max_workers)
+    except (TypeError, ValueError) as exc:
+        return jsonify({"error": str(exc)}), 400
+    return jsonify(settings)
 
 
 @app.post("/api/tasks")
 def api_create_task():
     payload = request.get_json(silent=True) or {}
     selected_paths = payload.get("paths") or []
-    if not isinstance(selected_paths, list) or not all(isinstance(p, str) for p in selected_paths):
+    if not isinstance(selected_paths, list) or not all(isinstance(path, str) for path in selected_paths):
         return jsonify({"error": "Request must include a list of relative paths."}), 400
     if not selected_paths:
         return jsonify({"error": "Select at least one folder or image."}), 400
@@ -571,9 +1004,9 @@ def api_list_tasks():
     status_filter = request.args.get("status")
     tasks = task_manager.list_tasks()
     if status_filter:
-        allowed = {s.strip() for s in status_filter.split(",")}
-        tasks = [t for t in tasks if t["status"] in allowed]
-    return jsonify({"tasks": tasks})
+        allowed = {status.strip() for status in status_filter.split(",")}
+        tasks = [task for task in tasks if task["status"] in allowed]
+    return jsonify({"tasks": tasks, "settings": task_manager.get_settings()})
 
 
 @app.get("/api/tasks/<task_id>")
@@ -594,7 +1027,10 @@ def api_stop_task(task_id: str):
 
 @app.post("/api/tasks/<task_id>/resume")
 def api_resume_task(task_id: str):
-    snapshot = task_manager.resume_task(task_id)
+    try:
+        snapshot = task_manager.resume_task(task_id)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
     if not snapshot:
         return jsonify({"error": "Task not found."}), 404
     return jsonify(snapshot)
@@ -631,4 +1067,7 @@ def api_task_events(task_id: str):
 
 
 if __name__ == "__main__":
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    host = os.environ.get(HOST_ENV_VAR, DEFAULT_HOST)
+    port = int(os.environ.get(PORT_ENV_VAR, DEFAULT_PORT))
+    debug = os.environ.get("FLASK_DEBUG", "0") == "1"
+    app.run(debug=debug, host=host, port=port, use_reloader=False)

@@ -111,6 +111,7 @@
         <div class="d-flex flex-wrap gap-2">
           <span class="badge rounded-pill badge-soft">Root: {{ photo_root }}</span>
           <span class="badge rounded-pill badge-soft">Model: {{ default_model }}</span>
+          <span class="badge rounded-pill badge-soft">Workers: <span id="hero-worker-count">{{ max_workers }}</span></span>
         </div>
       </div>
     </section>
@@ -176,6 +177,29 @@
       </section>
 
       <section class="col-xl-8">
+        <div class="panel p-3 mb-4">
+          <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+              <h2 class="h5 mb-1">Settings</h2>
+              <p class="text-secondary mb-0 small">Global worker throttle shared across all active tasks. Safe range: 1 to 4.</p>
+            </div>
+            <span id="settings-status" class="badge rounded-pill text-bg-light">{{ max_workers }} workers</span>
+          </div>
+          <div class="row g-3 align-items-center">
+            <div class="col-lg-8">
+              <label class="form-label small text-secondary" for="workers-range">Max Parallel Workers</label>
+              <input id="workers-range" class="form-range" type="range" min="1" max="4" step="1" value="{{ max_workers }}">
+            </div>
+            <div class="col-sm-4 col-lg-2">
+              <label class="form-label small text-secondary" for="workers-input">Workers</label>
+              <input id="workers-input" class="form-control" type="number" min="1" max="4" step="1" value="{{ max_workers }}">
+            </div>
+            <div class="col-sm-4 col-lg-2 d-grid align-self-end">
+              <button id="save-settings-button" class="btn btn-outline-primary" type="button">Apply</button>
+            </div>
+          </div>
+        </div>
+
         <div class="panel p-3 mb-4">
           <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3">
             <div>
@@ -245,6 +269,11 @@
     const tempInput = document.getElementById("temp-input");
     const dryRunInput = document.getElementById("dry-run-input");
     const selectOpenFolderButton = document.getElementById("select-open-folder");
+    const workersRange = document.getElementById("workers-range");
+    const workersInput = document.getElementById("workers-input");
+    const saveSettingsButton = document.getElementById("save-settings-button");
+    const settingsStatus = document.getElementById("settings-status");
+    const heroWorkerCount = document.getElementById("hero-worker-count");
 
     function normalizePath(path) {
       return (path || "").trim().replace(/^\/+/, "").replace(/\/+$/, "");
@@ -265,6 +294,14 @@
 
     function updateSelectionCount() {
       selectionCount.textContent = `${state.selected.size} selected`;
+    }
+
+    function setWorkerDisplay(value) {
+      const safeValue = Number(value);
+      workersRange.value = safeValue;
+      workersInput.value = safeValue;
+      settingsStatus.textContent = `${safeValue} worker${safeValue === 1 ? "" : "s"}`;
+      heroWorkerCount.textContent = safeValue;
     }
 
     // ------------------------------------------------------------------
@@ -390,6 +427,7 @@
         const task = state.tasks.get(taskId) || {};
         task.status = "running";
         task.total = p.total || task.total;
+        task.eta_seconds = p.eta_seconds ?? task.eta_seconds;
         state.tasks.set(taskId, task);
         updateTaskCard(task);
         logLine(`Task ${taskId.slice(0, 6)} started — ${p.total} image(s)`, taskId);
@@ -403,15 +441,22 @@
       src.addEventListener("skip", (e) => {
         const p = JSON.parse(e.data);
         const task = state.tasks.get(taskId) || {};
-        Object.assign(task, { completed: p.current, status: "running" });
+        Object.assign(task, {
+          completed: p.current,
+          skipped: (task.skipped || 0) + 1,
+          status: task.status === "stopped" ? "stopped" : "running",
+          eta_seconds: p.eta_seconds ?? task.eta_seconds,
+        });
         state.tasks.set(taskId, task);
         updateTaskCard(task);
+        if (p.message) logLine(p.message, taskId);
       });
 
       src.addEventListener("dry-run", (e) => {
         const p = JSON.parse(e.data);
         const task = state.tasks.get(taskId) || {};
         task.completed = p.current;
+        task.eta_seconds = p.eta_seconds ?? task.eta_seconds;
         state.tasks.set(taskId, task);
         updateTaskCard(task);
         logLine(`Dry-run: ${p.path}`, taskId);
@@ -437,12 +482,12 @@
 
       src.addEventListener("error", (e) => {
         const p = JSON.parse(e.data);
-        if (p.current) {
-          const task = state.tasks.get(taskId) || {};
-          task.completed = p.current;
-          state.tasks.set(taskId, task);
-          updateTaskCard(task);
-        }
+        const task = state.tasks.get(taskId) || {};
+        if (p.current) task.completed = p.current;
+        task.errors = (task.errors || 0) + 1;
+        task.eta_seconds = p.eta_seconds ?? task.eta_seconds;
+        state.tasks.set(taskId, task);
+        updateTaskCard(task);
         logLine(`Error: ${p.message || "unknown"}`, taskId);
       });
 
@@ -509,31 +554,35 @@
         return;
       }
 
-      const resp = await fetch("/api/tasks", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          paths: Array.from(state.selected),
-          root: state.root,
-          model: modelInput.value.trim(),
-          temperature: Number(tempInput.value),
-          dry_run: dryRunInput.checked,
-          prompt: promptInput.value,
-        }),
-      });
+      createTaskButton.disabled = true;
+      const requestedPaths = Array.from(state.selected).sort();
 
-      const data = await resp.json();
-      if (!resp.ok) {
-        logLine(`Error: ${data.error || "Could not create task."}`);
-        return;
-      }
+      try {
+        const resp = await fetch("/api/tasks", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            paths: requestedPaths,
+            root: state.root,
+            model: modelInput.value.trim(),
+            temperature: Number(tempInput.value),
+            dry_run: dryRunInput.checked,
+            prompt: promptInput.value,
+          }),
+        });
 
-      state.tasks.set(data.id, data);
-      renderTaskCard(data);
-      logLine(`Task ${data.id.slice(0, 6)} queued — ${data.total} image(s)`, data.id);
+        const data = await resp.json();
+        if (!resp.ok) {
+          logLine(`Error: ${data.error || "Could not create task."}`);
+          return;
+        }
 
-      if (data.status === "running") {
+        state.tasks.set(data.id, data);
+        renderTaskCard(data);
         subscribeTask(data.id);
+        logLine(`Task ${data.id.slice(0, 6)} queued for ${requestedPaths.join(", ") || "/"}.`, data.id);
+      } finally {
+        createTaskButton.disabled = false;
       }
     }
 
@@ -546,6 +595,9 @@
         const resp = await fetch("/api/tasks");
         const data = await resp.json();
         if (!resp.ok) return;
+        if (data.settings?.max_workers) {
+          setWorkerDisplay(data.settings.max_workers);
+        }
         for (const task of data.tasks) {
           const prev = state.tasks.get(task.id);
           state.tasks.set(task.id, task);
@@ -560,6 +612,32 @@
           }
         }
       } catch (_) { /* network issue, skip */ }
+    }
+
+    async function loadSettings() {
+      const response = await fetch("/api/settings");
+      const payload = await response.json();
+      if (!response.ok) {
+        logLine(payload.error || "Could not load settings.");
+        return;
+      }
+      setWorkerDisplay(payload.max_workers);
+    }
+
+    async function saveSettings() {
+      const requested = Number(workersInput.value || workersRange.value);
+      const response = await fetch("/api/settings", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ max_workers: requested }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        logLine(`Settings error: ${payload.error || "Could not update workers."}`);
+        return;
+      }
+      setWorkerDisplay(payload.max_workers);
+      logLine(`Global worker limit updated to ${payload.max_workers}.`);
     }
 
     setInterval(pollTasks, 3000);
@@ -705,8 +783,12 @@
     rootInput.addEventListener("keydown", (event) => {
       if (event.key === "Enter") { event.preventDefault(); applyRootButton.click(); }
     });
+    workersRange.addEventListener("input", () => setWorkerDisplay(workersRange.value));
+    workersInput.addEventListener("input", () => setWorkerDisplay(workersInput.value || 1));
+    saveSettingsButton.addEventListener("click", saveSettings);
     createTaskButton.addEventListener("click", createTask);
 
+    loadSettings();
     loadHealth();
     loadTree();
     updateSelectionCount();

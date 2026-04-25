@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+lib/
+lib64/
+include/
+bin/
+.git/
+.gitignore
+indexing.db
+tagger.log

@@ -8,17 +8,22 @@ import sys
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import ollama
 
 logger = logging.getLogger("tagger")
 
-DEFAULT_PHOTO_ROOT = "/mnt/synology"
-DEFAULT_DASHBOARD_ROOT = "/mnt/synology"
+DEFAULT_PHOTO_ROOT = "/mnt/synology/photos"
+DEFAULT_DASHBOARD_ROOT = "/mnt/synology/photos"
 DEFAULT_MODEL = "llava:13b"
 DEFAULT_DB = "indexing.db"
 DEFAULT_LOG = "tagger.log"
+DEFAULT_HOST = "0.0.0.0"
+DEFAULT_PORT = 5000
+DEFAULT_MAX_WORKERS = 2
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
+IGNORED_DIRECTORY_NAMES = {"@eaDir", "#recycle", "@Recycle"}
 
 OLLAMA_PROMPT = (
     "Analyze this image for high-precision search indexing. Provide a concise, descriptive string focusing on: 1.Main Subject (e.g., specific vehicle type, person, object)2.Setting (e.g., port, warehouse, outdoors, office) 3.Colors and Lighting (e.g., bright sunlight, neon, dominant blue) 4.Key Details (e.g., license plates, logos, weather). Format: [Subject] [Action] at [Setting], [Colors]. No introductory text. Max 20 words."
@@ -137,9 +142,28 @@ def mark_processed(conn: sqlite3.Connection, file_path: str, mtime: float) -> No
 
 def iter_images(root: str):
     """Yield Path objects for every supported image under *root*."""
-    for path in Path(root).rglob("*"):
-        if path.is_file() and path.suffix.lower() in SUPPORTED_EXTENSIONS:
-            yield path
+    for current_root, dirnames, filenames in os.walk(root):
+        dirnames[:] = [name for name in dirnames if name not in IGNORED_DIRECTORY_NAMES]
+        for filename in filenames:
+            path = Path(current_root) / filename
+            if path.suffix.lower() in SUPPORTED_EXTENSIONS:
+                yield path
+
+
+def is_visible_directory(path: Path) -> bool:
+    """Return True when *path* should appear in the dashboard explorer."""
+    return path.is_dir() and path.name not in IGNORED_DIRECTORY_NAMES
+
+
+def directory_has_visible_children(path: Path) -> bool:
+    """Return True when a directory contains visible folders or supported images."""
+    try:
+        for child in path.iterdir():
+            if is_visible_directory(child) or is_supported_image(child):
+                return True
+    except OSError:
+        return False
+    return False
 
 
 def is_supported_image(path: Path) -> bool:
@@ -179,12 +203,12 @@ def list_directory(root: str, relative_path: str = "") -> dict:
     files = []
 
     for child in sorted(current_path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
-        if child.is_dir():
+        if is_visible_directory(child):
             folders.append(
                 {
                     "name": child.name,
                     "path": to_relative_path(root, child),
-                    "has_children": any(grandchild.is_dir() or is_supported_image(grandchild) for grandchild in child.iterdir()),
+                    "has_children": directory_has_visible_children(child),
                 }
             )
         elif is_supported_image(child):
@@ -290,6 +314,154 @@ def write_metadata(image_path: Path, description: str) -> None:
         )
 
 
+def read_existing_metadata(image_path: Path) -> dict[str, str]:
+    """Read selected metadata fields from *image_path* using exiftool."""
+    cmd = [
+        "exiftool",
+        "-j",
+        "-m",
+        "-Description",
+        "-UserComment",
+        "-ImageDescription",
+        "-XPComment",
+        str(image_path),
+    ]
+
+    result = subprocess.run(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"exiftool metadata read failed (exit {result.returncode}): {result.stderr.strip()}"
+        )
+
+    try:
+        payload: list[dict[str, Any]] = json.loads(result.stdout or "[]")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Could not parse exiftool metadata output: {exc}") from exc
+
+    if not payload:
+        return {}
+
+    values = payload[0]
+    return {
+        "Description": str(values.get("Description", "") or "").strip(),
+        "UserComment": str(values.get("UserComment", "") or "").strip(),
+        "ImageDescription": str(values.get("ImageDescription", "") or "").strip(),
+        "XPComment": str(values.get("XPComment", "") or "").strip(),
+    }
+
+
+def has_existing_description(image_path: Path) -> bool:
+    """Return True if the image already contains a manual description field."""
+    metadata = read_existing_metadata(image_path)
+    for key in ("Description", "UserComment", "ImageDescription", "XPComment"):
+        if metadata.get(key):
+            return True
+    return False
+
+
+def should_skip_file(
+    conn: sqlite3.Connection,
+    file_path: str,
+    mtime: float,
+    image_path: Path,
+) -> tuple[bool, str | None]:
+    """Return whether a file should be skipped and the reason for the skip."""
+    if is_processed(conn, file_path, mtime):
+        return True, "db"
+
+    if has_existing_description(image_path):
+        return True, "metadata"
+
+    return False, None
+
+
+def process_single_image(
+    image_path: str | Path,
+    model: str,
+    db_path: str,
+    dry_run: bool,
+    *,
+    prompt: str = OLLAMA_PROMPT,
+    temperature: float = 0.2,
+) -> dict[str, Any]:
+    """Process exactly one image and return a structured result."""
+    path = Path(image_path)
+    file_path_str = str(path)
+
+    try:
+        mtime = os.path.getmtime(path)
+    except OSError as exc:
+        return {
+            "event": "error",
+            "path": file_path_str,
+            "message": f"cannot read mtime: {exc}",
+        }
+
+    if dry_run:
+        logger.info("[DRY-RUN] %s", file_path_str)
+        return {
+            "event": "dry-run",
+            "path": file_path_str,
+            "description": None,
+        }
+
+    conn = open_db(db_path)
+    try:
+        skip, reason = should_skip_file(conn, file_path_str, mtime, path)
+        if skip:
+            if reason == "metadata":
+                logger.info("Skipping: Manual description already exists in file. %s", file_path_str)
+                return {
+                    "event": "skip",
+                    "path": file_path_str,
+                    "message": "Skipping: Manual description already exists in file.",
+                    "skip_reason": reason,
+                }
+
+            logger.debug("[CACHED] %s", file_path_str)
+            return {
+                "event": "skip",
+                "path": file_path_str,
+                "skip_reason": reason,
+            }
+
+        description = describe_image(
+            path,
+            model,
+            prompt=prompt,
+            temperature=temperature,
+        )
+
+        write_metadata(path, description)
+
+        try:
+            written_mtime = os.path.getmtime(path)
+        except OSError:
+            written_mtime = mtime
+
+        mark_processed(conn, file_path_str, written_mtime)
+        logger.info("metadata written: %s", file_path_str)
+        return {
+            "event": "written",
+            "path": file_path_str,
+            "description": description,
+        }
+    except RuntimeError as exc:
+        return {
+            "event": "error",
+            "path": file_path_str,
+            "message": str(exc),
+        }
+    finally:
+        conn.close()
+
+
 def process_image_paths(
     image_paths,
     model: str,
@@ -302,7 +474,6 @@ def process_image_paths(
     stop_event: "threading.Event | None" = None,
 ) -> dict:
     """Process a concrete list of image paths and return a summary dictionary."""
-    conn = open_db(db_path) if not dry_run else None
     images = [Path(image_path) for image_path in image_paths]
     total = len(images)
 
@@ -321,126 +492,64 @@ def process_image_paths(
     errors = 0
 
     was_stopped = False
-    try:
-        for idx, image_path in enumerate(images, start=1):
-            if stop_event and stop_event.is_set():
-                was_stopped = True
-                break
+    for idx, image_path in enumerate(images, start=1):
+        if stop_event and stop_event.is_set():
+            was_stopped = True
+            break
 
-            file_path_str = str(image_path)
+        file_path_str = str(image_path)
+        if event_callback and not dry_run:
+            event_callback({
+                "event": "processing",
+                "current": idx,
+                "total": total,
+                "path": file_path_str,
+            })
 
-            try:
-                mtime = os.path.getmtime(image_path)
-            except OSError as exc:
-                logger.error("[%d/%d] SKIP  %s - cannot read mtime: %s", idx, total, file_path_str, exc)
-                errors += 1
-                if event_callback:
-                    event_callback({
-                        "event": "error",
-                        "current": idx,
-                        "total": total,
-                        "path": file_path_str,
-                        "message": f"cannot read mtime: {exc}",
-                    })
-                continue
+        result = process_single_image(
+            image_path,
+            model,
+            db_path,
+            dry_run,
+            prompt=prompt,
+            temperature=temperature,
+        )
 
-            if not dry_run and is_processed(conn, file_path_str, mtime):
-                logger.debug("[%d/%d] CACHED  %s", idx, total, file_path_str)
-                skipped += 1
-                if event_callback:
-                    event_callback({
-                        "event": "skip",
-                        "current": idx,
-                        "total": total,
-                        "path": file_path_str,
-                    })
-                continue
+        event_name = result["event"]
+        payload = {
+            "event": event_name,
+            "current": idx,
+            "total": total,
+            "path": result.get("path", file_path_str),
+        }
 
-            if dry_run:
-                logger.info("[%d/%d] DRY-RUN  %s", idx, total, file_path_str)
-                logger.info("           Would describe with model '%s' and write metadata.", model)
-                if event_callback:
-                    event_callback({
-                        "event": "dry-run",
-                        "current": idx,
-                        "total": total,
-                        "path": file_path_str,
-                    })
-                continue
-
-            if event_callback:
-                event_callback({
-                    "event": "processing",
-                    "current": idx,
-                    "total": total,
-                    "path": file_path_str,
-                })
-
-            try:
-                description = describe_image(
-                    image_path,
-                    model,
-                    prompt=prompt,
-                    temperature=temperature,
-                )
-            except RuntimeError as exc:
-                logger.error("[%d/%d] ERROR  %s - %s", idx, total, file_path_str, exc)
-                errors += 1
-                if event_callback:
-                    event_callback({
-                        "event": "error",
-                        "current": idx,
-                        "total": total,
-                        "path": file_path_str,
-                        "message": str(exc),
-                    })
-                continue
-
+        if result.get("description"):
             logger.info("[%d/%d] DESCRIBE  %s", idx, total, image_path.name)
-            logger.info("            %s", description)
+            logger.info("            %s", result["description"])
             if event_callback:
                 event_callback({
                     "event": "describe",
                     "current": idx,
                     "total": total,
                     "path": file_path_str,
-                    "description": description,
+                    "description": result["description"],
                 })
 
-            try:
-                write_metadata(image_path, description)
-            except RuntimeError as exc:
-                logger.error("[%d/%d] ERROR  %s - %s", idx, total, file_path_str, exc)
-                errors += 1
-                if event_callback:
-                    event_callback({
-                        "event": "error",
-                        "current": idx,
-                        "total": total,
-                        "path": file_path_str,
-                        "message": str(exc),
-                    })
-                continue
+        if result.get("message"):
+            payload["message"] = result["message"]
+        if result.get("skip_reason"):
+            payload["skip_reason"] = result["skip_reason"]
 
-            try:
-                written_mtime = os.path.getmtime(image_path)
-            except OSError:
-                written_mtime = mtime
-
-            mark_processed(conn, file_path_str, written_mtime)
+        if event_name == "written":
             processed += 1
-            logger.info("            metadata written")
-            if event_callback:
-                event_callback({
-                    "event": "written",
-                    "current": idx,
-                    "total": total,
-                    "path": file_path_str,
-                    "description": description,
-                })
-    finally:
-        if conn:
-            conn.close()
+        elif event_name == "skip":
+            skipped += 1
+        elif event_name == "error":
+            logger.error("[%d/%d] ERROR  %s - %s", idx, total, file_path_str, result.get("message", "unknown error"))
+            errors += 1
+
+        if event_callback:
+            event_callback(payload)
 
     total_handled = processed + skipped + errors
     summary = {
