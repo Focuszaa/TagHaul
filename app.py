@@ -708,6 +708,196 @@ class TaskManager:
             if task and listener in task["listeners"]:
                 task["listeners"].remove(listener)
 
+    # ------------------------------------------------------------------
+    # Scheduler support methods
+    # ------------------------------------------------------------------
+
+    def _get_default_root(self) -> str:
+        """Return the default photo root path for scheduler batch execution."""
+        return get_dashboard_root()
+
+    def create_scheduled_batch(
+        self, name, schedule_type, schedule_value, selected_paths,
+        model=None, prompt=None, temperature=0.2, dry_run=False,
+        tags=None, notifications=None,
+    ) -> dict:
+        from scheduler import ScheduleParser
+
+        batch_id = uuid.uuid4().hex
+        now = datetime.now(timezone.utc)
+
+        if model is None:
+            model = DEFAULT_MODEL
+        if prompt is None:
+            prompt = OLLAMA_PROMPT
+
+        next_run = ScheduleParser.calculate_next_run(schedule_type, schedule_value)
+        if not next_run and schedule_type == 'once':
+            raise ValueError("Schedule time is in the past")
+
+        with self._lock:
+            self._conn.execute("""
+                INSERT INTO scheduled_batches
+                (id, name, enabled, schedule_type, schedule_value, selected_paths,
+                 model, prompt, temperature, dry_run, next_run_at, created_at, updated_at, tags, notifications)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                batch_id, name, 1, schedule_type, json.dumps(schedule_value),
+                json.dumps(selected_paths), model, prompt, temperature,
+                int(dry_run), next_run.isoformat(), now.isoformat(), now.isoformat(),
+                json.dumps(tags or []), json.dumps(notifications or {}),
+            ))
+            self._conn.commit()
+
+        return self.get_scheduled_batch(batch_id)
+
+    def get_scheduled_batch(self, batch_id):
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT * FROM scheduled_batches WHERE id = ?", (batch_id,)
+            ).fetchone()
+            if not row:
+                return None
+            return {
+                'id': row[0],
+                'name': row[1],
+                'enabled': bool(row[2]),
+                'schedule_type': row[3],
+                'schedule_value': json.loads(row[4]),
+                'selected_paths': json.loads(row[5]),
+                'model': row[6],
+                'prompt': row[7],
+                'temperature': row[8],
+                'dry_run': bool(row[9]),
+                'last_run_at': row[10],
+                'next_run_at': row[11],
+                'created_at': row[12],
+                'updated_at': row[13],
+                'tags': json.loads(row[14]) if row[14] else [],
+                'notifications': json.loads(row[15]) if row[15] else {},
+            }
+
+    def get_scheduled_batches(self, enabled_only=False):
+        with self._lock:
+            query = "SELECT * FROM scheduled_batches"
+            if enabled_only:
+                query += " WHERE enabled = 1"
+            query += " ORDER BY next_run_at ASC"
+
+            rows = self._conn.execute(query).fetchall()
+            batches = []
+            for row in rows:
+                batches.append({
+                    'id': row[0],
+                    'name': row[1],
+                    'enabled': bool(row[2]),
+                    'schedule_type': row[3],
+                    'schedule_value': json.loads(row[4]),
+                    'selected_paths': json.loads(row[5]),
+                    'model': row[6],
+                    'prompt': row[7],
+                    'temperature': row[8],
+                    'dry_run': bool(row[9]),
+                    'last_run_at': row[10],
+                    'next_run_at': row[11],
+                    'created_at': row[12],
+                    'updated_at': row[13],
+                    'tags': json.loads(row[14]) if row[14] else [],
+                    'notifications': json.loads(row[15]) if row[15] else {},
+                })
+            return batches
+
+    def update_scheduled_batch(self, batch_id, **updates):
+        from scheduler import ScheduleParser
+
+        with self._lock:
+            batch = self.get_scheduled_batch(batch_id)
+            if not batch:
+                raise KeyError(f"Batch {batch_id} not found")
+
+            allowed_fields = ['name', 'enabled', 'schedule_type', 'schedule_value',
+                             'selected_paths', 'model', 'prompt', 'temperature',
+                             'dry_run', 'tags', 'notifications']
+
+            for key, value in updates.items():
+                if key in allowed_fields:
+                    batch[key] = value
+
+            if 'schedule_type' in updates or 'schedule_value' in updates:
+                next_run = ScheduleParser.calculate_next_run(
+                    batch['schedule_type'], batch['schedule_value']
+                )
+                batch['next_run_at'] = next_run.isoformat() if next_run else None
+
+            batch['updated_at'] = datetime.now(timezone.utc).isoformat()
+
+            self._conn.execute("""
+                UPDATE scheduled_batches
+                SET name=?, enabled=?, schedule_type=?, schedule_value=?,
+                    selected_paths=?, model=?, prompt=?, temperature=?,
+                    dry_run=?, next_run_at=?, updated_at=?, tags=?, notifications=?
+                WHERE id=?
+            """, (
+                batch['name'], int(batch['enabled']), batch['schedule_type'],
+                json.dumps(batch['schedule_value']), json.dumps(batch['selected_paths']),
+                batch['model'], batch['prompt'], batch['temperature'],
+                int(batch['dry_run']), batch['next_run_at'], batch['updated_at'],
+                json.dumps(batch['tags']), json.dumps(batch['notifications']),
+                batch_id,
+            ))
+            self._conn.commit()
+
+        return batch
+
+    def delete_scheduled_batch(self, batch_id):
+        with self._lock:
+            result = self._conn.execute(
+                "DELETE FROM scheduled_batches WHERE id = ?", (batch_id,)
+            )
+            self._conn.commit()
+            return result.rowcount > 0
+
+    def get_batch_history(self, batch_id):
+        with self._lock:
+            rows = self._conn.execute("""
+                SELECT * FROM batch_history
+                WHERE batch_id = ?
+                ORDER BY started_at DESC
+            """, (batch_id,)).fetchall()
+
+            history = []
+            for row in rows:
+                history.append({
+                    'id': row[0],
+                    'batch_id': row[1],
+                    'task_id': row[2],
+                    'started_at': row[3],
+                    'completed_at': row[4],
+                    'status': row[5],
+                    'summary': json.loads(row[6]) if row[6] else None,
+                })
+            return history
+
+    def execute_batch_now(self, batch_id):
+        batch = self.get_scheduled_batch(batch_id)
+        if not batch:
+            raise KeyError(f"Batch {batch_id} not found")
+
+        from scheduler import BatchScheduler
+        temp_scheduler = BatchScheduler(self._db_path, self)
+        temp_scheduler._execute_batch({
+            'id': batch['id'],
+            'selected_paths': json.dumps(batch['selected_paths']),
+            'model': batch['model'],
+            'dry_run': batch['dry_run'],
+            'prompt': batch['prompt'],
+            'temperature': batch['temperature'],
+            'schedule_type': batch['schedule_type'],
+            'schedule_value': json.dumps(batch['schedule_value']),
+        })
+
+        return batch['id']
+
     def _schedule_loop(self) -> None:
         while True:
             completed_preparation = None
@@ -909,7 +1099,16 @@ class TaskManager:
                         self._finalize_task_locked(task_id)
 
 
+from scheduler import BatchScheduler
+
 task_manager = TaskManager(get_db_path(), get_settings_path())
+batch_scheduler = BatchScheduler(get_db_path(), task_manager)
+batch_scheduler.start()
+
+import atexit
+def cleanup_scheduler():
+    batch_scheduler.stop()
+atexit.register(cleanup_scheduler)
 
 
 @app.get("/")
@@ -1064,6 +1263,104 @@ def api_task_events(task_id: str):
             task_manager.detach_listener(task_id, listener)
 
     return Response(generate(), mimetype="text/event-stream")
+
+
+# ------------------------------------------------------------------
+# Scheduled Batches API
+# ------------------------------------------------------------------
+
+
+@app.get("/api/scheduled-batches")
+def api_list_scheduled_batches():
+    enabled_only = request.args.get('enabled_only', 'false').lower() == 'true'
+    batches = task_manager.get_scheduled_batches(enabled_only)
+    return jsonify({"batches": batches})
+
+
+@app.post("/api/scheduled-batches")
+def api_create_scheduled_batch():
+    payload = request.get_json(silent=True) or {}
+
+    required = ['name', 'schedule_type', 'schedule_value', 'paths']
+    for field in required:
+        if field not in payload:
+            return jsonify({"error": f"Missing required field: {field}"}), 400
+
+    try:
+        batch = task_manager.create_scheduled_batch(
+            name=payload['name'],
+            schedule_type=payload['schedule_type'],
+            schedule_value=payload['schedule_value'],
+            selected_paths=payload['paths'],
+            model=payload.get('model', DEFAULT_MODEL),
+            prompt=payload.get('prompt', OLLAMA_PROMPT),
+            temperature=float(payload.get('temperature', 0.2)),
+            dry_run=bool(payload.get('dry_run', False)),
+            tags=payload.get('tags', []),
+            notifications=payload.get('notifications', {}),
+        )
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    except Exception as e:
+        return jsonify({"error": f"Failed to create batch: {str(e)}"}), 500
+
+    return jsonify(batch), 201
+
+
+@app.get("/api/scheduled-batches/<batch_id>")
+def api_get_scheduled_batch(batch_id):
+    batch = task_manager.get_scheduled_batch(batch_id)
+    if not batch:
+        return jsonify({"error": "Batch not found"}), 404
+    return jsonify(batch)
+
+
+@app.put("/api/scheduled-batches/<batch_id>")
+def api_update_scheduled_batch(batch_id):
+    payload = request.get_json(silent=True) or {}
+    try:
+        batch = task_manager.update_scheduled_batch(batch_id, **payload)
+    except KeyError:
+        return jsonify({"error": "Batch not found"}), 404
+    except ValueError as e:
+        return jsonify({"error": str(e)}), 400
+    return jsonify(batch)
+
+
+@app.delete("/api/scheduled-batches/<batch_id>")
+def api_delete_scheduled_batch(batch_id):
+    success = task_manager.delete_scheduled_batch(batch_id)
+    if not success:
+        return jsonify({"error": "Batch not found"}), 404
+    return jsonify({"ok": True})
+
+
+@app.post("/api/scheduled-batches/<batch_id>/toggle")
+def api_toggle_scheduled_batch(batch_id):
+    payload = request.get_json(silent=True) or {}
+    enabled = payload.get('enabled', True)
+    try:
+        batch = task_manager.update_scheduled_batch(batch_id, enabled=enabled)
+    except KeyError:
+        return jsonify({"error": "Batch not found"}), 404
+    return jsonify(batch)
+
+
+@app.get("/api/scheduled-batches/<batch_id>/history")
+def api_batch_history(batch_id):
+    history = task_manager.get_batch_history(batch_id)
+    return jsonify({"history": history})
+
+
+@app.post("/api/scheduled-batches/<batch_id>/run-now")
+def api_run_batch_now(batch_id):
+    try:
+        task_manager.execute_batch_now(batch_id)
+        return jsonify({"message": "Batch execution started"})
+    except KeyError:
+        return jsonify({"error": "Batch not found"}), 404
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 
 if __name__ == "__main__":

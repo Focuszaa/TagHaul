@@ -97,6 +97,248 @@
       position: sticky;
       top: 1rem;
     }
+
+    /* Scheduler Styles */
+    .scheduler-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 20px;
+        padding-bottom: 15px;
+        border-bottom: 2px solid #e0e0e0;
+    }
+
+    .batch-list {
+        display: flex;
+        flex-direction: column;
+        gap: 15px;
+    }
+
+    .batch-card {
+        background: white;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+        padding: 15px;
+        transition: box-shadow 0.3s;
+    }
+
+    .batch-card:hover {
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+
+    .batch-card.enabled {
+        border-left: 4px solid #4CAF50;
+    }
+
+    .batch-card.disabled {
+        border-left: 4px solid #999;
+        opacity: 0.7;
+    }
+
+    .batch-header {
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        margin-bottom: 10px;
+    }
+
+    .batch-header h4 {
+        margin: 0;
+        color: #333;
+        font-size: 18px;
+    }
+
+    .batch-controls {
+        display: flex;
+        gap: 8px;
+    }
+
+    .batch-controls button {
+        padding: 4px 10px;
+        font-size: 12px;
+    }
+
+    .batch-details {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        gap: 8px;
+        font-size: 13px;
+        color: #666;
+    }
+
+    .batch-details strong {
+        color: #333;
+    }
+
+    .btn-toggle {
+        background: #FF9800;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+    }
+
+    .btn-toggle:hover {
+        background: #F57C00;
+    }
+
+    .btn-run {
+        background: #2196F3;
+        color: white;
+        border: none;
+        border-radius: 4px;
+        cursor: pointer;
+    }
+
+    .btn-run:hover {
+        background: #0b7dda;
+    }
+
+    /* Modal Styles */
+    .modal {
+        display: none;
+        position: fixed;
+        z-index: 1000;
+        left: 0;
+        top: 0;
+        width: 100%;
+        height: 100%;
+        background-color: rgba(0,0,0,0.5);
+        overflow-y: auto;
+    }
+
+    .modal-content {
+        background-color: white;
+        margin: 50px auto;
+        padding: 25px;
+        border-radius: 8px;
+        width: 90%;
+        max-width: 600px;
+        position: relative;
+        max-height: 85%;
+        overflow-y: auto;
+    }
+
+    .modal .close {
+        position: absolute;
+        right: 20px;
+        top: 15px;
+        font-size: 28px;
+        font-weight: bold;
+        cursor: pointer;
+        color: #aaa;
+    }
+
+    .modal .close:hover {
+        color: #000;
+    }
+
+    .form-group {
+        margin-bottom: 20px;
+    }
+
+    .form-group label {
+        display: block;
+        margin-bottom: 5px;
+        font-weight: bold;
+        color: #333;
+    }
+
+    .form-group input[type="text"],
+    .form-group input[type="number"],
+    .form-group input[type="time"],
+    .form-group input[type="datetime-local"],
+    .form-group select {
+        width: 100%;
+        padding: 8px 12px;
+        border: 1px solid #ddd;
+        border-radius: 4px;
+        font-size: 14px;
+    }
+
+    .form-group input[type="checkbox"] {
+        margin-right: 8px;
+    }
+
+    .form-group small {
+        display: block;
+        margin-top: 5px;
+        color: #666;
+        font-size: 12px;
+    }
+
+    #weekday-selector {
+        display: flex;
+        gap: 10px;
+        flex-wrap: wrap;
+    }
+
+    #weekday-selector label {
+        font-weight: normal;
+        display: inline-flex;
+        align-items: center;
+        gap: 5px;
+    }
+
+    .path-list {
+        background: #f5f5f5;
+        padding: 10px;
+        border-radius: 4px;
+        margin-bottom: 10px;
+        max-height: 100px;
+        overflow-y: auto;
+    }
+
+    .path-item {
+        font-size: 12px;
+        padding: 3px 0;
+        font-family: monospace;
+    }
+
+    .form-actions {
+        display: flex;
+        gap: 10px;
+        justify-content: flex-end;
+        margin-top: 25px;
+        padding-top: 15px;
+        border-top: 1px solid #eee;
+    }
+
+    .history-list {
+        margin-top: 10px;
+        max-height: 200px;
+        overflow-y: auto;
+    }
+
+    .history-item {
+        padding: 8px;
+        border-bottom: 1px solid #eee;
+        font-size: 12px;
+    }
+
+    .history-item.running { color: #2196F3; }
+    .history-item.completed { color: #4CAF50; }
+    .history-item.failed { color: #f44336; }
+
+    .tab-button {
+        padding: 8px 16px;
+        border: 1px solid var(--sea);
+        background: transparent;
+        color: var(--sea);
+        border-radius: 8px;
+        cursor: pointer;
+        font-weight: 600;
+        transition: all 0.2s;
+    }
+
+    .tab-button:hover {
+        background: rgba(15, 118, 110, 0.1);
+    }
+
+    .tab-button.active {
+        background: var(--sea);
+        color: white;
+    }
   </style>
 </head>
 <body>
@@ -104,9 +346,9 @@
     <section class="panel hero mb-4">
       <div class="d-flex flex-column flex-lg-row align-items-lg-end justify-content-between gap-3">
         <div>
-          <p class="text-uppercase fw-semibold text-secondary mb-2">Phase 2 Dashboard</p>
-          <h1 class="display-6 mb-2">AI Photo Tagging Dashboard</h1>
-          <p class="mb-0 text-secondary">Browse the mounted NAS tree, select folders or files, and stream model output live while a single tagging job runs.</p>
+          <p class="text-uppercase fw-semibold text-secondary mb-2">AI Photo Tagging Dashboard</p>
+          <h1 class="display-6 mb-2">TagHaul</h1>
+          <p class="mb-0 text-secondary">Browse, tag, and schedule AI-powered photo indexing.</p>
         </div>
         <div class="d-flex flex-wrap gap-2">
           <span class="badge rounded-pill badge-soft">Root: {{ photo_root }}</span>
@@ -116,6 +358,14 @@
       </div>
     </section>
 
+    <!-- Tab Navigation -->
+    <div class="d-flex gap-2 mb-4">
+      <button class="tab-button active" onclick="switchTab('tasks')">Tasks</button>
+      <button class="tab-button" onclick="switchTab('scheduler')">Scheduled Batches</button>
+    </div>
+
+    <!-- Tasks Tab -->
+    <div id="tasks-tab" class="tab-content">
     <div class="row g-4">
       <section class="col-xl-4">
         <div class="panel p-3 sticky-action">
@@ -240,6 +490,104 @@
         </div>
       </section>
     </div>
+    </div> <!-- end tasks-tab -->
+
+    <!-- Scheduled Batches Tab -->
+    <div id="scheduler-tab" class="tab-content" style="display: none;">
+        <div class="scheduler-header">
+            <h2>Scheduled Batches</h2>
+            <button onclick="showCreateBatchModal()" class="btn btn-warning px-4">
+                + Create Scheduled Batch
+            </button>
+        </div>
+
+        <div id="scheduled-batches-list" class="batch-list">
+            <p>Loading scheduled batches...</p>
+        </div>
+    </div>
+
+    <!-- Create/Edit Batch Modal -->
+    <div id="batch-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeModal()">&times;</span>
+            <h3 id="modal-title">Create Scheduled Batch</h3>
+
+            <form id="batch-form" onsubmit="saveBatch(event)">
+                <input type="hidden" id="edit-batch-id">
+
+                <div class="form-group">
+                    <label>Batch Name *</label>
+                    <input type="text" id="batch-name" required placeholder="e.g., Daily Night Scan">
+                </div>
+
+                <div class="form-group">
+                    <label>Schedule Type *</label>
+                    <select id="schedule-type" onchange="updateScheduleUI()">
+                        <option value="once">Once (One Time)</option>
+                        <option value="daily">Daily</option>
+                        <option value="weekly">Weekly</option>
+                        <option value="monthly">Monthly</option>
+                        <option value="cron">Custom Cron Expression</option>
+                    </select>
+                </div>
+
+                <div id="schedule-fields"></div>
+
+                <div class="form-group">
+                    <label>Paths to Process *</label>
+                    <div id="selected-paths-display" class="path-list">
+                        <em>No paths selected</em>
+                    </div>
+                    <button type="button" onclick="openPathSelectorForBatch()" class="btn btn-outline-primary btn-sm">
+                        Select Paths from Explorer
+                    </button>
+                </div>
+
+                <div class="form-group">
+                    <label>AI Model</label>
+                    <input type="text" id="batch-model" value="llava:13b">
+                </div>
+
+                <div class="form-group">
+                    <label>Temperature (0.0 - 1.0)</label>
+                    <input type="number" id="batch-temperature" step="0.1" min="0" max="1" value="0.2">
+                </div>
+
+                <div class="form-group">
+                    <label>
+                        <input type="checkbox" id="batch-dry-run">
+                        Dry Run (Preview only, no metadata written)
+                    </label>
+                </div>
+
+                <div class="form-group">
+                    <label>Tags (comma separated)</label>
+                    <input type="text" id="batch-tags" placeholder="vacation, family, auto-tagged">
+                </div>
+
+                <div class="form-group">
+                    <label>Custom Prompt (optional)</label>
+                    <textarea id="batch-prompt" rows="3" style="width:100%"></textarea>
+                    <small>Leave empty to use default prompt</small>
+                </div>
+
+                <div class="form-actions">
+                    <button type="submit" class="btn btn-warning">Save Batch</button>
+                    <button type="button" onclick="closeModal()" class="btn btn-outline-secondary">Cancel</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- View History Modal -->
+    <div id="history-modal" class="modal">
+        <div class="modal-content">
+            <span class="close" onclick="closeHistoryModal()">&times;</span>
+            <h3>Batch Execution History</h3>
+            <div id="history-content"></div>
+        </div>
+    </div>
+
   </main>
 
   <script>
@@ -249,6 +597,8 @@
       selected: new Set(),
       tasks: new Map(),      // id -> snapshot
       sources: new Map(),    // id -> EventSource
+      selectedPathsForBatch: [],
+      currentEditingBatchId: null,
     };
 
     const rootInput = document.getElementById("root-input");
@@ -787,6 +1137,452 @@
     workersInput.addEventListener("input", () => setWorkerDisplay(workersInput.value || 1));
     saveSettingsButton.addEventListener("click", saveSettings);
     createTaskButton.addEventListener("click", createTask);
+
+    // ------------------------------------------------------------------
+    // Scheduler / Scheduled Batches
+    // ------------------------------------------------------------------
+
+    function switchTab(tabName) {
+        document.querySelectorAll('.tab-content').forEach(tab => {
+            tab.style.display = 'none';
+        });
+        document.getElementById(`${tabName}-tab`).style.display = 'block';
+
+        document.querySelectorAll('.tab-button').forEach(btn => {
+            btn.classList.remove('active');
+        });
+        const btn = Array.from(document.querySelectorAll('.tab-button')).find(b => b.textContent.includes(tabName === 'tasks' ? 'Tasks' : 'Scheduled'));
+        if (btn) btn.classList.add('active');
+
+        if (tabName === 'scheduler') {
+            loadScheduledBatches();
+        }
+    }
+
+    async function loadScheduledBatches() {
+        const container = document.getElementById('scheduled-batches-list');
+        container.innerHTML = '<p>Loading...</p>';
+
+        try {
+            const response = await fetch('/api/scheduled-batches');
+            const data = await response.json();
+
+            if (!data.batches || data.batches.length === 0) {
+                container.innerHTML = '<p>No scheduled batches found. Click "Create Scheduled Batch" to get started.</p>';
+                return;
+            }
+
+            container.innerHTML = data.batches.map(batch => `
+                <div class="batch-card ${batch.enabled ? 'enabled' : 'disabled'}">
+                    <div class="batch-header">
+                        <h4>${escapeHtml(batch.name)}</h4>
+                        <div class="batch-controls">
+                            <button onclick="toggleBatch('${batch.id}', ${!batch.enabled})" class="btn-toggle">
+                                ${batch.enabled ? 'Disable' : 'Enable'}
+                            </button>
+                            <button onclick="editBatch('${batch.id}')" class="btn btn-outline-primary btn-sm">Edit</button>
+                            <button onclick="viewBatchHistory('${batch.id}')" class="btn btn-outline-secondary btn-sm">History</button>
+                            <button onclick="runBatchNow('${batch.id}')" class="btn-run">Run Now</button>
+                            <button onclick="deleteBatch('${batch.id}')" class="btn btn-outline-danger btn-sm">Delete</button>
+                        </div>
+                    </div>
+                    <div class="batch-details">
+                        <div><strong>Schedule:</strong> ${formatSchedule(batch)}</div>
+                        <div><strong>Next Run:</strong> ${formatDate(batch.next_run_at)}</div>
+                        <div><strong>Last Run:</strong> ${formatDate(batch.last_run_at) || 'Never'}</div>
+                        <div><strong>Paths:</strong> ${batch.selected_paths.length} item(s)</div>
+                        <div><strong>Model:</strong> ${batch.model}</div>
+                        ${batch.tags && batch.tags.length ? `<div><strong>Tags:</strong> ${batch.tags.join(', ')}</div>` : ''}
+                    </div>
+                </div>
+            `).join('');
+        } catch (error) {
+            console.error('Failed to load batches:', error);
+            container.innerHTML = '<p>Error loading scheduled batches. Check console for details.</p>';
+        }
+    }
+
+    function formatSchedule(batch) {
+        const value = batch.schedule_value;
+        switch(batch.schedule_type) {
+            case 'once':
+                return `Once at ${formatDate(value.datetime)}`;
+            case 'daily':
+                let daysText = '';
+                if (value.days && value.days.length > 0 && value.days.length < 7) {
+                    const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+                    daysText = ` on ${value.days.map(d => dayNames[d]).join(', ')}`;
+                }
+                return `Daily${daysText} at ${value.time}`;
+            case 'weekly':
+                const weekdays = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+                return `Weekly on ${weekdays[value.weekday]} at ${value.time}`;
+            case 'monthly':
+                return `Monthly on day ${value.day} at ${value.time}`;
+            case 'cron':
+                return `Cron: ${value}`;
+            default:
+                return batch.schedule_type;
+        }
+    }
+
+    function formatDate(dateString) {
+        if (!dateString) return null;
+        const date = new Date(dateString);
+        if (isNaN(date.getTime())) return dateString;
+        return date.toLocaleString();
+    }
+
+    function updateScheduleUI() {
+        const type = document.getElementById('schedule-type').value;
+        const container = document.getElementById('schedule-fields');
+
+        switch(type) {
+            case 'once':
+                container.innerHTML = `
+                    <div class="form-group">
+                        <label>Date & Time *</label>
+                        <input type="datetime-local" id="schedule-datetime" required>
+                    </div>
+                `;
+                break;
+            case 'daily':
+                container.innerHTML = `
+                    <div class="form-group">
+                        <label>Time *</label>
+                        <input type="time" id="schedule-time" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Days of week (optional, leave all unchecked for every day)</label>
+                        <div id="weekday-selector">
+                            ${['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day, idx) => `
+                                <label>
+                                    <input type="checkbox" value="${idx}" class="weekday-checkbox">
+                                    ${day}
+                                </label>
+                            `).join('')}
+                        </div>
+                    </div>
+                `;
+                break;
+            case 'weekly':
+                container.innerHTML = `
+                    <div class="form-group">
+                        <label>Day of week *</label>
+                        <select id="schedule-weekday">
+                            <option value="0">Monday</option>
+                            <option value="1">Tuesday</option>
+                            <option value="2">Wednesday</option>
+                            <option value="3">Thursday</option>
+                            <option value="4">Friday</option>
+                            <option value="5">Saturday</option>
+                            <option value="6">Sunday</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Time *</label>
+                        <input type="time" id="schedule-time" required>
+                    </div>
+                `;
+                break;
+            case 'monthly':
+                container.innerHTML = `
+                    <div class="form-group">
+                        <label>Day of month (1-31) *</label>
+                        <input type="number" id="schedule-day" min="1" max="31" required>
+                    </div>
+                    <div class="form-group">
+                        <label>Time *</label>
+                        <input type="time" id="schedule-time" required>
+                    </div>
+                `;
+                break;
+            case 'cron':
+                container.innerHTML = `
+                    <div class="form-group">
+                        <label>Cron Expression *</label>
+                        <input type="text" id="schedule-cron" placeholder="0 14 * * *" required>
+                        <small>Format: minute hour day month weekday (0 14 * * * = daily at 2 PM)</small>
+                    </div>
+                `;
+                break;
+        }
+    }
+
+    function openPathSelectorForBatch() {
+        // Switch to explorer/tasks tab so user can select paths
+        document.querySelectorAll('.tab-button').forEach(btn => {
+            if (btn.textContent.includes('Tasks')) {
+                btn.click();
+            }
+        });
+        logLine("Select paths from the Explorer, then come back to Scheduled Batches tab.");
+    }
+
+    function showCreateBatchModal() {
+        state.currentEditingBatchId = null;
+        document.getElementById('modal-title').textContent = 'Create Scheduled Batch';
+        document.getElementById('batch-form').reset();
+        document.getElementById('edit-batch-id').value = '';
+        state.selectedPathsForBatch = [];
+        document.getElementById('selected-paths-display').innerHTML = '<em>No paths selected</em>';
+        updateScheduleUI();
+        document.getElementById('batch-modal').style.display = 'block';
+    }
+
+    async function editBatch(batchId) {
+        try {
+            const response = await fetch(`/api/scheduled-batches/${batchId}`);
+            const batch = await response.json();
+
+            state.currentEditingBatchId = batchId;
+            document.getElementById('modal-title').textContent = 'Edit Scheduled Batch';
+            document.getElementById('edit-batch-id').value = batchId;
+            document.getElementById('batch-name').value = batch.name;
+            document.getElementById('schedule-type').value = batch.schedule_type;
+            document.getElementById('batch-model').value = batch.model;
+            document.getElementById('batch-temperature').value = batch.temperature;
+            document.getElementById('batch-dry-run').checked = batch.dry_run;
+            document.getElementById('batch-tags').value = (batch.tags || []).join(', ');
+            document.getElementById('batch-prompt').value = batch.prompt || '';
+
+            state.selectedPathsForBatch = batch.selected_paths;
+            const display = document.getElementById('selected-paths-display');
+            display.innerHTML = batch.selected_paths.map(p => `<div class="path-item">📁 ${p}</div>`).join('');
+
+            updateScheduleUI();
+
+            // Fill schedule-specific fields
+            const value = batch.schedule_value;
+            if (batch.schedule_type === 'once') {
+                const dt = document.getElementById('schedule-datetime');
+                if (dt && value.datetime) dt.value = value.datetime.slice(0, 16);
+            } else if (batch.schedule_type === 'daily') {
+                const timeInput = document.getElementById('schedule-time');
+                if (timeInput && value.time) timeInput.value = value.time;
+                if (value.days) {
+                    document.querySelectorAll('.weekday-checkbox').forEach(cb => {
+                        cb.checked = value.days.includes(parseInt(cb.value));
+                    });
+                }
+            } else if (batch.schedule_type === 'weekly') {
+                const wd = document.getElementById('schedule-weekday');
+                const timeInput = document.getElementById('schedule-time');
+                if (wd && value.weekday != null) wd.value = value.weekday;
+                if (timeInput && value.time) timeInput.value = value.time;
+            } else if (batch.schedule_type === 'monthly') {
+                const day = document.getElementById('schedule-day');
+                const timeInput = document.getElementById('schedule-time');
+                if (day && value.day) day.value = value.day;
+                if (timeInput && value.time) timeInput.value = value.time;
+            } else if (batch.schedule_type === 'cron') {
+                const cron = document.getElementById('schedule-cron');
+                if (cron && value) cron.value = value;
+            }
+
+            document.getElementById('batch-modal').style.display = 'block';
+        } catch (error) {
+            console.error('Failed to load batch:', error);
+            alert('Error loading batch details');
+        }
+    }
+
+    async function saveBatch(event) {
+        event.preventDefault();
+
+        const batchId = document.getElementById('edit-batch-id').value;
+        const scheduleType = document.getElementById('schedule-type').value;
+
+        let scheduleValue = {};
+        switch(scheduleType) {
+            case 'once':
+                scheduleValue = {datetime: document.getElementById('schedule-datetime').value};
+                break;
+            case 'daily':
+                scheduleValue = {
+                    time: document.getElementById('schedule-time').value,
+                    days: Array.from(document.querySelectorAll('.weekday-checkbox:checked')).map(cb => parseInt(cb.value))
+                };
+                break;
+            case 'weekly':
+                scheduleValue = {
+                    weekday: parseInt(document.getElementById('schedule-weekday').value),
+                    time: document.getElementById('schedule-time').value
+                };
+                break;
+            case 'monthly':
+                scheduleValue = {
+                    day: parseInt(document.getElementById('schedule-day').value),
+                    time: document.getElementById('schedule-time').value
+                };
+                break;
+            case 'cron':
+                scheduleValue = document.getElementById('schedule-cron').value;
+                break;
+        }
+
+        const batchData = {
+            name: document.getElementById('batch-name').value,
+            schedule_type: scheduleType,
+            schedule_value: scheduleValue,
+            paths: state.selectedPathsForBatch,
+            model: document.getElementById('batch-model').value,
+            temperature: parseFloat(document.getElementById('batch-temperature').value),
+            dry_run: document.getElementById('batch-dry-run').checked,
+            tags: document.getElementById('batch-tags').value.split(',').map(t => t.trim()).filter(t => t),
+            prompt: document.getElementById('batch-prompt').value || null
+        };
+
+        try {
+            let response;
+            if (batchId) {
+                response = await fetch(`/api/scheduled-batches/${batchId}`, {
+                    method: 'PUT',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(batchData)
+                });
+            } else {
+                response = await fetch('/api/scheduled-batches', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(batchData)
+                });
+            }
+
+            if (response.ok) {
+                closeModal();
+                loadScheduledBatches();
+            } else {
+                const error = await response.json();
+                alert('Error: ' + (error.error || 'Failed to save batch'));
+            }
+        } catch (error) {
+            console.error('Failed to save batch:', error);
+            alert('Error saving batch');
+        }
+    }
+
+    async function toggleBatch(batchId, enabled) {
+        try {
+            const response = await fetch(`/api/scheduled-batches/${batchId}/toggle`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({enabled: enabled})
+            });
+
+            if (response.ok) {
+                loadScheduledBatches();
+            } else {
+                alert('Error toggling batch');
+            }
+        } catch (error) {
+            console.error('Failed to toggle batch:', error);
+            alert('Error toggling batch');
+        }
+    }
+
+    async function runBatchNow(batchId) {
+        if (!confirm('Run this batch now? This will create a new tagging task immediately.')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/scheduled-batches/${batchId}/run-now`, {
+                method: 'POST'
+            });
+
+            if (response.ok) {
+                alert('Batch execution started! Check the Tasks tab for progress.');
+                document.querySelectorAll('.tab-button').forEach(btn => {
+                    if (btn.textContent.includes('Tasks')) {
+                        btn.click();
+                    }
+                });
+            } else {
+                const error = await response.json();
+                alert('Error: ' + (error.error || 'Failed to run batch'));
+            }
+        } catch (error) {
+            console.error('Failed to run batch:', error);
+            alert('Error running batch');
+        }
+    }
+
+    async function deleteBatch(batchId) {
+        if (!confirm('Delete this scheduled batch? This cannot be undone.')) {
+            return;
+        }
+
+        try {
+            const response = await fetch(`/api/scheduled-batches/${batchId}`, {
+                method: 'DELETE'
+            });
+
+            if (response.ok) {
+                loadScheduledBatches();
+            } else {
+                alert('Error deleting batch');
+            }
+        } catch (error) {
+            console.error('Failed to delete batch:', error);
+            alert('Error deleting batch');
+        }
+    }
+
+    async function viewBatchHistory(batchId) {
+        try {
+            const response = await fetch(`/api/scheduled-batches/${batchId}/history`);
+            const data = await response.json();
+
+            const container = document.getElementById('history-content');
+            if (!data.history || data.history.length === 0) {
+                container.innerHTML = '<p>No execution history found.</p>';
+            } else {
+                container.innerHTML = `
+                    <div class="history-list">
+                        ${data.history.map(h => `
+                            <div class="history-item ${h.status}">
+                                <strong>${formatDate(h.started_at)}</strong><br>
+                                Status: ${h.status}<br>
+                                Task ID: ${h.task_id ? h.task_id.substring(0, 8) + '...' : 'N/A'}<br>
+                                ${h.completed_at ? `Completed: ${formatDate(h.completed_at)}` : ''}
+                            </div>
+                        `).join('')}
+                    </div>
+                `;
+            }
+            document.getElementById('history-modal').style.display = 'block';
+        } catch (error) {
+            console.error('Failed to load history:', error);
+            alert('Error loading history');
+        }
+    }
+
+    function escapeHtml(text) {
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function closeModal() {
+        document.getElementById('batch-modal').style.display = 'none';
+    }
+
+    function closeHistoryModal() {
+        document.getElementById('history-modal').style.display = 'none';
+    }
+
+    // Close modals when clicking outside
+    window.onclick = function(event) {
+        const modal = document.getElementById('batch-modal');
+        const historyModal = document.getElementById('history-modal');
+        if (event.target === modal) {
+            closeModal();
+        }
+        if (event.target === historyModal) {
+            closeHistoryModal();
+        }
+    }
 
     loadSettings();
     loadHealth();

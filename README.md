@@ -58,7 +58,8 @@ pip install ollama flask
 
 ## Usage
 
-### Start the Phase 2 dashboard
+Then open `http://127.0.0.1:5001` in your browser (default port changed to `5001`).
+### Start the dashboard
 
 ```bash
 python app.py
@@ -69,20 +70,26 @@ Then open `http://127.0.0.1:5000` in your browser.
 Dashboard notes:
 
 - The dashboard defaults to `/mnt/synology/photos`, but you can change the server photo root in the UI.
-- Multiple tasks can run at once, but the global worker pool is capped by the **Max Parallel Workers** setting.
-- You can select both folders and individual images.
+```bash
+	docker run --rm -p 5001:5001 \
 - Progress and descriptions stream live with Server-Sent Events.
 - The default worker count is `2`, adjustable live in the UI from `1` to `4`.
 - If your photos live somewhere else, set the `Server photo root` field to that absolute path.
 
 ### Environment file
-
+```
 Copy [.env.example](/home/user/Documents/projects/auto-gen-description/.env.example) to `.env` and adjust paths as needed:
 
 ```bash
 cp .env.example .env
 ```
 
+If you prefer direct install commands:
+
+```bash
+pip install ollama flask
+# New dependency for scheduler cron expressions: `croniter` is included in `requirements.txt`.
+```
 Available settings:
 
 ```bash
@@ -99,23 +106,14 @@ OLLAMA_HOST=http://host.docker.internal:11434
 `OLLAMA_HOST` is passed through to the `ollama` Python client. For Docker on Linux, point it at the host gateway as shown below.
 
 ### Docker
-
+PHOTO_TAGGER_PORT=5001
 Build the image:
 
 ```bash
 docker build -t taghaul .
-```
-
-Run it with a persistent volume for the SQLite database and saved worker setting:
-
 ```bash
 docker run --rm -p 5000:5000 \
 	--env-file .env \
-	--add-host=host.docker.internal:host-gateway \
-	-v $(pwd)/data:/data \
-	-v /mnt/synology:/mnt/synology \
-	taghaul
-```
 
 Notes:
 
@@ -183,10 +181,3 @@ Re-run `python tagger.py` or trigger the same selection from the dashboard at an
 | `Photo root is not a directory` | Check your NAS mount with `ls /mnt/synology` |
 | File processed but description not visible in Synology Photos | Trigger a re-index in Synology Photos > Settings > Re-index |
 | Dashboard explorer returns an error | Confirm `/mnt/synology/photos` is mounted and readable by the Flask process |
-
-## Changelog
-
-### v0.4.0 — Phase 4 — Global Concurrency And Metadata Guard — 2026-04-25
-- Added a shared global worker pool with live `1..4` runtime concurrency control in the dashboard.
-- Added double-guard skip logic using both the SQLite registry and on-file metadata detection before Ollama runs.
-- Added Docker packaging, persistent settings storage, and env-based runtime configuration.

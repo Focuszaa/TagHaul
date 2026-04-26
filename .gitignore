@@ -13,3 +13,6 @@ __pycache__
 bin
 indexing.db*
 requirements.md
+*.cfg
+*.ini
+*.log

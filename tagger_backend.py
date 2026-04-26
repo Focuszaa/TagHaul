@@ -20,7 +20,7 @@ DEFAULT_MODEL = "llava:13b"
 DEFAULT_DB = "indexing.db"
 DEFAULT_LOG = "tagger.log"
 DEFAULT_HOST = "0.0.0.0"
-DEFAULT_PORT = 5000
+DEFAULT_PORT = 5001
 DEFAULT_MAX_WORKERS = 2
 SUPPORTED_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 IGNORED_DIRECTORY_NAMES = {"@eaDir", "#recycle", "@Recycle"}
@@ -109,6 +109,41 @@ def open_task_db(db_path: str) -> sqlite3.Connection:
             created_at     TEXT    NOT NULL,
             started_at     TEXT,
             completed_at   TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scheduled_batches (
+            id              TEXT    PRIMARY KEY,
+            name            TEXT    NOT NULL,
+            enabled         INTEGER NOT NULL DEFAULT 1,
+            schedule_type   TEXT    NOT NULL,
+            schedule_value  TEXT    NOT NULL,
+            selected_paths  TEXT    NOT NULL,
+            model           TEXT    NOT NULL,
+            prompt          TEXT    NOT NULL,
+            temperature     REAL    NOT NULL,
+            dry_run         INTEGER NOT NULL DEFAULT 0,
+            last_run_at     TEXT,
+            next_run_at     TEXT    NOT NULL,
+            created_at      TEXT    NOT NULL,
+            updated_at      TEXT    NOT NULL,
+            tags            TEXT,
+            notifications   TEXT
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS batch_history (
+            id              TEXT    PRIMARY KEY,
+            batch_id        TEXT    NOT NULL,
+            task_id         TEXT    NOT NULL,
+            started_at      TEXT    NOT NULL,
+            completed_at    TEXT,
+            status          TEXT    NOT NULL,
+            summary         TEXT
         )
         """
     )
