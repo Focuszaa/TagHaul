@@ -3,7 +3,7 @@
 Automatically describe photos using a local LLM (Ollama `llava:13b`) and write the descriptions into image metadata so they are searchable in **Synology Photos**, Windows Explorer, and macOS Finder. The repo now includes both the original CLI workflow and a Flask dashboard with multi-task scheduling, shared worker concurrency, and live progress streaming.
 
 
-![alt text](app.png)
+![alt text](App.png)
 
 
 ---
