@@ -1,5 +1,11 @@
 # Changelog
 
+### v0.5.1 — Synology Deployment & Release Automation — 2026-05-03
+- Added GitHub Actions workflow at `.github/workflows/ci.yaml` to build and push multi-arch Docker images on version tag pushes.
+- Added Docker metadata-based tagging in CI (tag versions plus `latest`) for Docker Hub image `nirutfcz/taghual`.
+- Updated Synology-focused Docker Compose defaults with DSM-style bind mounts and non-conflicting host port mapping (`5050:5000`).
+- Added explicit `platform` support in Compose (`TAGHAUL_PLATFORM`) to avoid architecture mismatch (`exec format error`) on NAS devices.
+
 ### v0.5.0 — Scheduler & Batch Automation — 2026-04-26
 - Added scheduled batch capability with a web UI to create, edit, enable/disable, run-now, and view history.
 - Implemented `BatchScheduler` for background execution of scheduled batches.

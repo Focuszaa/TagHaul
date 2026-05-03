@@ -1,6 +1,6 @@
 services:
   taghaul:
-    image: nirutfcz/taghual:0.4.0
+    image: nirutfcz/taghual:latest
     platform: ${TAGHAUL_PLATFORM:-linux/amd64}
     container_name: taghaul
     restart: unless-stopped
