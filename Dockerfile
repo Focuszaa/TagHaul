@@ -26,4 +26,4 @@ ENV PHOTO_TAGGER_DB_PATH=/data/indexing.db \
 VOLUME ["/data"]
 EXPOSE 5000
 
-CMD ["python", "app.py"]
+CMD ["python", "-m", "taghaul.app"]

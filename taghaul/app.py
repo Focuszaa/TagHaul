@@ -17,21 +17,21 @@ from flask import jsonify
 from flask import render_template
 from flask import request
 
-from tagger_backend import DEFAULT_DASHBOARD_ROOT
-from tagger_backend import DEFAULT_DB
-from tagger_backend import DEFAULT_HOST
-from tagger_backend import DEFAULT_LOG
-from tagger_backend import DEFAULT_MAX_WORKERS
-from tagger_backend import DEFAULT_MODEL
-from tagger_backend import DEFAULT_PORT
-from tagger_backend import OLLAMA_PROMPT
-from tagger_backend import expand_selection
-from tagger_backend import list_directory
-from tagger_backend import logger
-from tagger_backend import open_task_db
-from tagger_backend import process_single_image
-from tagger_backend import serialize_event
-from tagger_backend import setup_logging
+from .tagger_backend import DEFAULT_DASHBOARD_ROOT
+from .tagger_backend import DEFAULT_DB
+from .tagger_backend import DEFAULT_HOST
+from .tagger_backend import DEFAULT_LOG
+from .tagger_backend import DEFAULT_MAX_WORKERS
+from .tagger_backend import DEFAULT_MODEL
+from .tagger_backend import DEFAULT_PORT
+from .tagger_backend import OLLAMA_PROMPT
+from .tagger_backend import expand_selection
+from .tagger_backend import list_directory
+from .tagger_backend import logger
+from .tagger_backend import open_task_db
+from .tagger_backend import process_single_image
+from .tagger_backend import serialize_event
+from .tagger_backend import setup_logging
 
 APP_ROOT = Path(__file__).resolve().parent
 DASHBOARD_ROOT_ENV_VAR = "PHOTO_TAGGER_DASHBOARD_ROOT"
@@ -721,7 +721,7 @@ class TaskManager:
         model=None, prompt=None, temperature=0.2, dry_run=False,
         tags=None, notifications=None,
     ) -> dict:
-        from scheduler import ScheduleParser
+        from .scheduler import ScheduleParser
 
         batch_id = uuid.uuid4().hex
         now = datetime.now(timezone.utc)
@@ -808,7 +808,7 @@ class TaskManager:
             return batches
 
     def update_scheduled_batch(self, batch_id, **updates):
-        from scheduler import ScheduleParser
+        from .scheduler import ScheduleParser
 
         with self._lock:
             batch = self.get_scheduled_batch(batch_id)
@@ -883,7 +883,7 @@ class TaskManager:
         if not batch:
             raise KeyError(f"Batch {batch_id} not found")
 
-        from scheduler import BatchScheduler
+        from .scheduler import BatchScheduler
         temp_scheduler = BatchScheduler(self._db_path, self)
         temp_scheduler._execute_batch({
             'id': batch['id'],
@@ -1099,7 +1099,7 @@ class TaskManager:
                         self._finalize_task_locked(task_id)
 
 
-from scheduler import BatchScheduler
+from .scheduler import BatchScheduler
 
 task_manager = TaskManager(get_db_path(), get_settings_path())
 batch_scheduler = BatchScheduler(get_db_path(), task_manager)

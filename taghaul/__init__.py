@@ -1,0 +1,1 @@
+"""TagHaul application package."""

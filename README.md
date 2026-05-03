@@ -66,7 +66,7 @@ Then open `http://127.0.0.1:5001` in your browser (default port changed to `5001
 ### Start the dashboard
 
 ```bash
-python app.py
+python -m taghaul.app
 ```
 
 Then open `http://127.0.0.1:5000` in your browser.
@@ -129,25 +129,25 @@ Notes:
 ### Dry run (safe preview — no files touched)
 
 ```bash
-python tagger.py --dry-run
+python -m taghaul.tagger --dry-run
 ```
 
 ### Tag all photos on the NAS
 
 ```bash
-python tagger.py
+python -m taghaul.tagger
 ```
 
 ### Tag a specific album
 
 ```bash
-python tagger.py --path /mnt/synology/photos/2024-holidays
+python -m taghaul.tagger --path /mnt/synology/photos/2024-holidays
 ```
 
 ### Use a different model
 
 ```bash
-python tagger.py --model llava:7b
+python -m taghaul.tagger --model llava:7b
 ```
 
 ### All options
@@ -172,7 +172,7 @@ exiftool -Description -ImageDescription -Keywords /mnt/synology/photos/IMG_1234.
 
 ## Re-running / incremental updates
 
-Re-run `python tagger.py` or trigger the same selection from the dashboard at any time. Only images that are **new** or whose **modification time has changed** will be processed. Everything else is skipped instantly.
+Re-run `python -m taghaul.tagger` or trigger the same selection from the dashboard at any time. Only images that are **new** or whose **modification time has changed** will be processed. Everything else is skipped instantly.
 
 ---
 
