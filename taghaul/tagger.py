@@ -8,7 +8,7 @@ A local SQLite database (indexing.db) tracks processed files so re-runs
 only touch new or changed images.
 
 Usage:
-    python tagger.py [OPTIONS]
+    python -m taghaul.tagger [OPTIONS]
 
 Options:
     --path PATH     Root directory to scan  (default: /mnt/synology)
@@ -21,13 +21,13 @@ Options:
 import argparse
 import sys
 from pathlib import Path
-from tagger_backend import DEFAULT_DB
-from tagger_backend import DEFAULT_LOG
-from tagger_backend import DEFAULT_MODEL
-from tagger_backend import DEFAULT_PHOTO_ROOT
-from tagger_backend import logger
-from tagger_backend import process_images
-from tagger_backend import setup_logging
+from .tagger_backend import DEFAULT_DB
+from .tagger_backend import DEFAULT_LOG
+from .tagger_backend import DEFAULT_MODEL
+from .tagger_backend import DEFAULT_PHOTO_ROOT
+from .tagger_backend import logger
+from .tagger_backend import process_images
+from .tagger_backend import setup_logging
 
 
 # ---------------------------------------------------------------------------
