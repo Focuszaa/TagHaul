@@ -18,7 +18,7 @@ RUN mkdir -p /data
 
 ENV PHOTO_TAGGER_DB_PATH=/data/indexing.db \
     PHOTO_TAGGER_SETTINGS_PATH=/data/tagger_settings.json \
-    PHOTO_TAGGER_DASHBOARD_ROOT=/mnt/synology/photos \
+    PHOTO_TAGGER_DASHBOARD_ROOT=/mnt/synology \
     PHOTO_TAGGER_HOST=0.0.0.0 \
     PHOTO_TAGGER_PORT=5000 \
     PHOTO_TAGGER_MAX_WORKERS=2

@@ -16,3 +16,4 @@ requirements.md
 *.cfg
 *.ini
 *.log
+env
